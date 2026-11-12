@@ -31,15 +31,13 @@ namespace
 		return value.substr(first, last - first + 1);
 	}
 
-	// Strip a Lua line comment. A '--' inside a quoted depot key would be
-	// meaningless anyway (keys are hex), so a plain search is sufficient.
+	// Keys are hex, so a plain search for '--' cannot hit a quoted value.
 	std::string stripComment(const std::string& line)
 	{
 		const auto comment = line.find("--");
 		return trim(comment == std::string::npos ? line : line.substr(0, comment));
 	}
 
-	// Split "a, b, \"c\"" into {"a", "b", "c"} with surrounding quotes removed.
 	std::vector<std::string> splitArgs(const std::string& args)
 	{
 		std::vector<std::string> out;
@@ -78,7 +76,6 @@ namespace
 		});
 	}
 
-	// name(arg, ...) — returns false for anything that is not a single call.
 	bool parseCall(const std::string& line, std::string& name, std::vector<std::string>& args)
 	{
 		const auto open = line.find('(');
@@ -182,8 +179,7 @@ std::vector<std::filesystem::path> StPlugin::scriptDirs()
 		{
 			continue;
 		}
-		// ~/.steam/steam is usually a symlink to ~/.local/share/Steam; do not
-		// parse the same directory twice.
+		// ~/.steam/steam is usually a symlink to ~/.local/share/Steam.
 		const auto canonical = std::filesystem::weakly_canonical(dir, ec).string();
 		if (std::find(seen.begin(), seen.end(), canonical) != seen.end())
 		{
@@ -226,9 +222,7 @@ void StPlugin::mergeInto(Import_t const& import)
 		return;
 	}
 
-	// setAdditionalApps() overwrites addedAppIds on every load, so union rather
-	// than insert-into-live: the config list stays authoritative for its own
-	// entries, and stplug-in ids are re-added on each reload.
+	// setAdditionalApps() overwrites addedAppIds on every load, so union.
 	auto ids = g_config.addedAppIds.copy();
 	const auto before = ids.size();
 	ids.insert(import.appIds.begin(), import.appIds.end());

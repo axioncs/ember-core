@@ -18,6 +18,7 @@
 #include <fstream>
 #include <mutex>
 #include <sstream>
+#include <unordered_map>
 #include <string>
 
 
@@ -176,9 +177,9 @@ namespace
 		return language;
 	}
 
-	// Empty when the app has no appinfo loaded, or the depot has no such config:
-	// both mean "cannot tell", and the depot is kept.
-	std::string depotConfig(const AppId_t appId, const AppId_t depotId, const char* name)
+	// Empty when the app has no appinfo loaded, or the key is absent: both mean
+	// "cannot tell", and the caller keeps the depot.
+	std::string appData(const AppId_t appId, const std::string& key)
 	{
 		const auto user = g_pSteamEngine ? g_pSteamEngine->getUser() : nullptr;
 		if (!user)
@@ -192,8 +193,7 @@ namespace
 			return {};
 		}
 
-		const auto key = "depots/" + std::to_string(depotId) + "/config/" + name;
-		char buf[64] {};
+		char buf[256] {};
 
 		if (appInfo->getAppData(appId, key.c_str(), buf, sizeof(buf)) <= 0)
 		{
@@ -201,6 +201,38 @@ namespace
 		}
 
 		return buf;
+	}
+
+	std::string depotConfig(const AppId_t appId, const AppId_t depotId, const char* name)
+	{
+		return appData(appId, "depots/" + std::to_string(depotId) + "/config/" + name);
+	}
+
+	// A DLC's depots are described in the DLC's own appinfo, not the base app's,
+	// so asking only the base app reports "cannot tell" for them — which is how
+	// the macOS half of Phantom Liberty survived the platform filter.
+	std::vector<AppId_t> dlcAppIds(const AppId_t appId)
+	{
+		std::vector<AppId_t> ids;
+
+		for (auto part : Utils::strsplit(appData(appId, "extended/listofdlc"), ","))
+		{
+			const auto first = part.find_first_not_of(" 	");
+			if (first == std::string::npos)
+			{
+				continue;
+			}
+
+			const auto last = part.find_last_not_of(" 	");
+			part = part.substr(first, last - first + 1);
+
+			if (!part.empty() && std::all_of(part.begin(), part.end(), [](unsigned char c) { return c >= '0' && c <= '9'; }))
+			{
+				ids.push_back(static_cast<AppId_t>(std::stoul(part)));
+			}
+		}
+
+		return ids;
 	}
 
 	// DepotLanguages from config, else the client's language. Empty means "no
@@ -277,6 +309,29 @@ namespace
 		// does — oslist must cover this platform, and the depot language must be
 		// one we accept.
 		const auto languages = acceptedLanguages();
+		const auto dlcs = dlcAppIds(appId);
+
+		// A depot's config lives in the appinfo of the app that owns it: the base
+		// app for its own depots, the DLC app for the DLC's.
+		const auto configFor = [&](const AppId_t depotId, const char* name) {
+			auto value = depotConfig(appId, depotId, name);
+			if (!value.empty())
+			{
+				return value;
+			}
+
+			for (const auto dlc : dlcs)
+			{
+				value = depotConfig(dlc, depotId, name);
+				if (!value.empty())
+				{
+					return value;
+				}
+			}
+
+			return value;
+		};
+
 		size_t localised = 0;
 		size_t droppedLanguage = 0;
 		size_t droppedPlatform = 0;
@@ -290,7 +345,7 @@ namespace
 				continue;
 			}
 
-			const auto osList = depotConfig(appId, pin.depotId, "oslist");
+			const auto osList = configFor(pin.depotId, "oslist");
 			if (!osList.empty() && osList.find("windows") == std::string::npos && osList.find("linux") == std::string::npos)
 			{
 				++droppedPlatform;
@@ -299,7 +354,7 @@ namespace
 
 			if (!languages.empty())
 			{
-				const auto depotLang = depotConfig(appId, pin.depotId, "language");
+				const auto depotLang = configFor(pin.depotId, "language");
 				if (!depotLang.empty())
 				{
 					++localised;
@@ -324,6 +379,26 @@ namespace
 		// appinfo at all), so nothing could be filtered.
 		LOG_INFO("Depot plan: app %u: %zu of %zu depot(s) localised, %zu dropped for language [%s], %zu dropped for platform\n",
 			appId, localised, pinned, droppedLanguage, accepted.c_str(), droppedPlatform);
+
+		// The depot list itself, once per distinct plan: DEBUG is stripped from
+		// release builds, so this is the only way to see what the plan contains.
+		std::string plan;
+		for (const auto* pin : keep)
+		{
+			plan += (plan.empty() ? "" : ",") + std::to_string(pin->depotId);
+		}
+
+		{
+			static std::mutex planMutex;
+			static std::unordered_map<AppId_t, std::string> loggedPlans;
+			const std::lock_guard lock(planMutex);
+
+			if (loggedPlans[appId] != plan)
+			{
+				loggedPlans[appId] = plan;
+				LOG_INFO("Depot plan: app %u keeps %s\n", appId, plan.c_str());
+			}
+		}
 
 		if (keep.empty())
 		{

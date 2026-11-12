@@ -2,6 +2,7 @@
 
 #include "feats/achievements.hpp"
 #include "feats/apps.hpp"
+#include "feats/depotkey.hpp"
 #include "feats/dlc.hpp"
 #include "feats/misc.hpp"
 #include "feats/fakeappid.hpp"
@@ -376,6 +377,7 @@ static void hkCMInterface_RecvPkt(CCMInterface* pCMInterface, CNetPacket* pNetPa
 
 		Misc::recvMsg(pNetPacket);
 		Ticket::recvMsg(pNetPacket);
+		DepotKey::recvMsg(pNetPacket);
 
 		const bool choke = Achievements::recvMsg(pNetPacket);
 		if (choke)

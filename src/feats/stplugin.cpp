@@ -130,6 +130,15 @@ namespace
 			return;
 		}
 
+		// The script is named after the app it unlocks. Some generators emit the
+		// app id only inside a depot-key line, which is filed as a key, so the
+		// filename is the authoritative source for the app id itself.
+		const auto stem = path.stem().string();
+		if (allDigits(stem))
+		{
+			out.appIds.insert(static_cast<AppId_t>(std::stoul(stem)));
+		}
+
 		std::string raw;
 		while (std::getline(file, raw))
 		{

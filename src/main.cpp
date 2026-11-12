@@ -182,7 +182,7 @@ static void load()
 		return;
 	}
 
-	LOG_INFO("SLSsteam %s loading in %s (%u)\n", getReleaseType().c_str(), proc.name, proc.pid);
+	LOG_INFO("ember %s loading in %s (%u)\n", getReleaseType().c_str(), proc.name, proc.pid);
 
 	CFileWatcher::installSigHandler();
 

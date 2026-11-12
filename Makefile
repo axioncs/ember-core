@@ -161,7 +161,14 @@ build: audit-libs tools
 rebuild: clean build
 release: rebuild zips
 
+# Host test for the pure stplug-in parser. No Steam, no -m32.
+test-stplugin:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -Werror \
+		tools/test_stplugin.cpp src/feats/stplugin_parse.cpp -o /tmp/test_stplugin
+	/tmp/test_stplugin
+
 .PHONY: \
+	test-stplugin \
 	audit-libs \
 	tools \
 	schema-grabber \

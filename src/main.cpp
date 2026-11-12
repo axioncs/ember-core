@@ -23,6 +23,7 @@
 #include <cstring>
 #include <dlfcn.h>
 #include <filesystem>
+#include <fstream>
 #include <gnu/libc-version.h>
 #include <link.h>
 #include <memory>
@@ -184,6 +185,22 @@ static void load()
 
 	LOG_INFO("ember %s loading in %s (%u)\n", getReleaseType().c_str(), proc.name, proc.pid);
 
+	// Crash guard: a marker written at the start of a run and removed only once
+	// the hooks are in place. If it survives, the previous start died inside
+	// ember — run vanilla for one session so the client is always reachable.
+	const auto bootMarker = CConfig::getDir() / ".boot-in-progress";
+	{
+		std::error_code ec;
+		if (std::filesystem::exists(bootMarker, ec))
+		{
+			LOG_NOTIFYERROR("Previous start did not finish; running vanilla this session\n");
+			std::filesystem::remove(bootMarker, ec);
+			return;
+		}
+		std::filesystem::create_directories(bootMarker.parent_path(), ec);
+		std::ofstream(bootMarker).close();
+	}
+
 	CFileWatcher::installSigHandler();
 
 	//Necessary for dbus notifications
@@ -255,6 +272,11 @@ static void load()
 		return;
 	}
 	LOG_INFO("Hooks placed\n");
+	{
+		// Everything that can abort is behind us.
+		std::error_code ec;
+		std::filesystem::remove(bootMarker, ec);
+	}
 
 	Lua::init(true);
 	SLSAPI::init();

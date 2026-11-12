@@ -9,8 +9,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstdlib>
+#include <filesystem>
 #include <memory>
 #include <sstream>
+#include <system_error>
 
 
 std::string ELogLevel_ToString(const LogLevelFlags_t lvlFlags)
@@ -398,6 +400,16 @@ CLog* CLog::createDefaultLog()
 	{
 		std::ostringstream ss;
 		ss << home << "/.ember.log";
+
+		// Keep one previous generation so the log cannot grow without bound.
+		std::error_code ec;
+		const std::filesystem::path path = ss.str();
+		if (std::filesystem::exists(path, ec) && std::filesystem::file_size(path, ec) > (8u << 20))
+		{
+			auto previous = path;
+			previous += ".1";
+			std::filesystem::rename(path, previous, ec);
+		}
 
 		return new CLog(ss.str().c_str());
 	}

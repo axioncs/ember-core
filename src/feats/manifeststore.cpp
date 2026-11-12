@@ -94,6 +94,14 @@ void ManifestStore::publish()
 			continue;
 		}
 
+		// A zero-byte manifest is never valid and Steam will fail to mount it.
+		const auto size = std::filesystem::file_size(entry.path(), ec);
+		if (ec || size == 0)
+		{
+			LOG_NOTIFYWARN("ManifestStore: refusing empty %s\n", name.c_str());
+			continue;
+		}
+
 		std::filesystem::copy_file(entry.path(), dest, std::filesystem::copy_options::overwrite_existing, ec);
 		if (ec)
 		{

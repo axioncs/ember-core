@@ -287,7 +287,7 @@ namespace
 	// manifest id are useless here: the plan asserts a valid manifest id, and
 	// Steam would have to ask the server for one, which it denies for an unowned
 	// depot.
-	uint32_t synthesiseDepotPlan(const AppId_t appId, CUtlVector<DepotInfo_t>* depots)
+	uint32_t synthesiseDepotPlan(const AppId_t appId, CUtlVector<DepotInfo_t>* depots, CUtlVector<DepotInfo_t>* sharedDepots)
 	{
 		const auto pins = StPlugin::depotPinsFor(appId);
 		if (pins.empty())
@@ -348,6 +348,27 @@ namespace
 		size_t droppedEmpty = 0;
 		size_t droppedForeign = 0;
 
+		// The languages the app actually ships. A depot localised outside this set
+		// is never needed, whichever language the user prefers.
+		std::vector<std::string> shipped;
+		for (auto part : Utils::strsplit(appData(appId, "depots/baselanguages"), ","))
+		{
+			const auto first = part.find_first_not_of(" 	");
+			if (first == std::string::npos)
+			{
+				continue;
+			}
+			const auto last = part.find_last_not_of(" 	");
+			part = part.substr(first, last - first + 1);
+			std::transform(part.begin(), part.end(), part.begin(), [](unsigned char c) {
+				return static_cast<char>(std::tolower(c));
+			});
+			if (!part.empty())
+			{
+				shipped.push_back(part);
+			}
+		}
+
 		// The size may come from the script or, when it carries none, from the
 		// appinfo's public manifest entry.
 		struct KeptDepot_t
@@ -355,6 +376,7 @@ namespace
 			AppId_t depotId;
 			uint64_t manifestId;
 			uint64_t size;
+			bool shared;
 		};
 
 		std::vector<KeptDepot_t> keep;
@@ -374,17 +396,22 @@ namespace
 				continue;
 			}
 
-			if (!languages.empty())
+			const auto depotLang = configFor(pin.depotId, "language");
+			if (!depotLang.empty())
 			{
-				const auto depotLang = configFor(pin.depotId, "language");
-				if (!depotLang.empty())
+				++localised;
+
+				// Not shipped by the app at all: no user can need it.
+				if (!shipped.empty() && std::find(shipped.begin(), shipped.end(), depotLang) == shipped.end())
 				{
-					++localised;
-					if (std::find(languages.begin(), languages.end(), depotLang) == languages.end())
-					{
-						++droppedLanguage;
-						continue;
-					}
+					++droppedLanguage;
+					continue;
+				}
+
+				if (!languages.empty() && std::find(languages.begin(), languages.end(), depotLang) == languages.end())
+				{
+					++droppedLanguage;
+					continue;
 				}
 			}
 
@@ -418,7 +445,16 @@ namespace
 				continue;
 			}
 
-			keep.push_back({ pin.depotId, pin.manifestId, size });
+			// Shared redistributable depots belong in sharedDepots: the caller has
+			// "already provided by another app" logic for that vector.
+			std::string sharedText = configFor(pin.depotId, "sharedinstall");
+			if (sharedText.empty())
+			{
+				sharedText = appData(appId, "depots/" + std::to_string(pin.depotId) + "/sharedinstall");
+			}
+			const bool shared = sharedText == "1" || sharedText == "true";
+
+			keep.push_back({ pin.depotId, pin.manifestId, size, shared });
 		}
 
 		std::string accepted;
@@ -463,24 +499,45 @@ namespace
 			return 0;
 		}
 
+		uint32_t normal = 0;
+		uint32_t sharedCount = 0;
+		for (const auto& depot : keep)
+		{
+			depot.shared ? ++sharedCount : ++normal;
+		}
+
+		if (normal && !growDepotVector(depots, normal))
+		{
+			return 0;
+		}
+		if (sharedCount && !growDepotVector(sharedDepots, sharedCount))
+		{
+			return 0;
+		}
+
 		uint32_t written = 0;
+		uint32_t writtenShared = 0;
 		for (const auto& depot : keep)
 		{
 			// Same shape the client itself builds: depot, app, manifest, size, rest
 			// zero. The size is what the caller sums into the install size, so a
 			// plan without it reads as 0 B.
-			DepotInfo_t& entry = depots->mem.base[written];
+			CUtlVector<DepotInfo_t>* target = depot.shared ? sharedDepots : depots;
+			uint32_t& index = depot.shared ? writtenShared : written;
+
+			DepotInfo_t& entry = target->mem.base[index];
 			memset(&entry, 0, sizeof(entry));
 			entry.depotId = depot.depotId;
 			entry.appId = appId;
 			entry.manifestId = depot.manifestId;
 			entry.size = depot.size;
-			++written;
+			++index;
 		}
 
 		depots->size = written;
-		LOG_INFO("Depot plan: synthesised %u depot(s) for unowned app %u\n", written, appId);
-		return written;
+		sharedDepots->size = writtenShared;
+		LOG_INFO("Depot plan: synthesised %u depot(s) for unowned app %u (%u shared)\n", written, appId, writtenShared);
+		return written + writtenShared;
 	}
 }
 
@@ -491,7 +548,7 @@ uint32_t Apps::buildDepotDependency(const AppId_t appId, CUtlVector<DepotInfo_t>
 	uint32_t synthesised = 0;
 	if (depots->size == 0 && g_config.isAddedAppId(appId))
 	{
-		synthesised = synthesiseDepotPlan(appId, depots);
+		synthesised = synthesiseDepotPlan(appId, depots, sharedDepots);
 	}
 	else if (depots->size != 0)
 	{

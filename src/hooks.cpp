@@ -653,6 +653,20 @@ static HServerRequest hkSteamMatchmakingServers_RequestInternetServerList(void* 
 }
 
 __attribute__((hot))
+static bool hkUser_BIsSubscribedApp(CUser* pUser, AppId_t appId)
+{
+	// The install planner asks this before it will build a depot plan. Answering
+	// true for a locally unlocked app lets Steam's own planner read the appinfo
+	// and apply its own oslist/language rules, instead of ember synthesising one.
+	if (g_config.isAddedAppId(appId))
+	{
+		return true;
+	}
+
+	return Hooks::CUser_BIsSubscribedApp->tramp.fn(pUser, appId);
+}
+
+__attribute__((hot))
 static bool hkUser_CheckAppOwnership(CUser* pUser, AppId_t appId, AppOwnershipInfo_t* pOwnershipInfo)
 {
 	LOG_TRACE("Calling tramp\n");
@@ -1312,6 +1326,7 @@ namespace Hooks
 
 	DetourHook<CUDPConnection_BAsyncSend_t>* CUDPConnection_BAsyncSend = nullptr;
 
+	DetourHook<CUser_BIsSubscribedApp_t>* CUser_BIsSubscribedApp = nullptr;
 	DetourHook<CUser_CheckAppOwnership_t>* CUser_CheckAppOwnership = nullptr;
 	DetourHook<CUser_GetSubscribedApps_t>* CUser_GetSubscribedApps = nullptr;
 	DetourHook<CUser_PostCallbackToAppId_t>* CUser_PostCallbackToAppId = nullptr;
@@ -1432,6 +1447,7 @@ bool Hooks::init()
 
 	CUDPConnection_BAsyncSend = new DetourHook(Patterns::CUDPConnection::BAsyncSend, hkUDPConnection_BAsyncSend);
 
+	CUser_BIsSubscribedApp = new DetourHook(VFTIndexes::IClientUser::BIsSubscribedApp, hkUser_BIsSubscribedApp);
 	CUser_CheckAppOwnership = new DetourHook(Patterns::CUser::CheckAppOwnership, hkUser_CheckAppOwnership);
 	CUser_GetSubscribedApps = new DetourHook(Patterns::CUser::GetSubscribedApps, hkUser_GetSubscribedApps);
 	CUser_PostCallbackToAppId = new DetourHook(Patterns::CUser::PostCallbackToAppId, hkUser_PostCallbackToAppId);

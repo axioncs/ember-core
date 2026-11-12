@@ -493,6 +493,12 @@ uint32_t Apps::buildDepotDependency(const AppId_t appId, CUtlVector<DepotInfo_t>
 	{
 		synthesised = synthesiseDepotPlan(appId, depots);
 	}
+	else if (depots->size != 0)
+	{
+		// Steam's own planner built this from appinfo, which is the preferred
+		// path: its oslist/language rules apply instead of ours.
+		LOG_INFO("Depot plan: app %u: planner produced %u depot(s)\n", appId, depots->size);
+	}
 
 	const auto depotBlacklist = g_config.depotBlacklist.get();
 	const auto manifestOverrides = g_config.manifestIds.get();

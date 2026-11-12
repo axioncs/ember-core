@@ -314,6 +314,11 @@ namespace VFTIndexes
 
 	namespace IClientUser
 	{
+		VFTableInfo_t BIsSubscribedApp
+		{
+			"14IClientUserMap",
+			"BIsSubscribedApp"
+		};
 		VFTableInfo_t BLoggedOn
 		{
 			"14IClientUserMap",

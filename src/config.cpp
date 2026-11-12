@@ -15,6 +15,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <sstream>
 #include <string>
 
@@ -88,6 +90,103 @@ bool CConfig::createFile() const
 	return true;
 }
 
+namespace
+{
+	constexpr int32_t kConfigVersion = 1;
+
+	// Splits the embedded template into top-level blocks: each is the run of
+	// comment/blank lines that introduce a key, the key line, and its indented
+	// body. Keeps the file's own comments when a block is appended.
+	std::vector<std::pair<std::string, std::string>> templateBlocks()
+	{
+		std::vector<std::pair<std::string, std::string>> blocks;
+		std::istringstream stream(defaultConfig);
+		std::string line;
+		std::string pending;
+
+		while (std::getline(stream, line))
+		{
+			const bool isComment = line.empty() || line[0] == '#';
+			const bool isKey = !isComment && line[0] != ' ' && line[0] != '	' && line.find(':') != std::string::npos;
+
+			if (isComment)
+			{
+				pending += line + "\n";
+				continue;
+			}
+
+			if (isKey)
+			{
+				const auto colon = line.find(':');
+				blocks.emplace_back(line.substr(0, colon), pending + line + "\n");
+				pending.clear();
+				continue;
+			}
+
+			if (!blocks.empty())
+			{
+				blocks.back().second += line + "\n";
+			}
+			else
+			{
+				pending += line + "\n";
+			}
+		}
+
+		return blocks;
+	}
+
+	bool hasKey(const std::string& text, const std::string& key)
+	{
+		std::istringstream stream(text);
+		std::string line;
+		while (std::getline(stream, line))
+		{
+			if (line.rfind(key + ":", 0) == 0)
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	// Appends any template key the file is missing, so an older config picks up new
+	// settings with their documented defaults instead of warning about each one.
+	void migrateConfig(const std::filesystem::path& path)
+	{
+		std::ifstream in(path);
+		if (!in.is_open())
+		{
+			return;
+		}
+
+		const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+		in.close();
+
+		std::string append;
+		for (const auto& [key, block] : templateBlocks())
+		{
+			if (!hasKey(text, key))
+			{
+				append += "\n" + block;
+			}
+		}
+
+		if (append.empty())
+		{
+			return;
+		}
+
+		std::ofstream out(path, std::ios::app);
+		if (!out.is_open())
+		{
+			return;
+		}
+
+		out << "\n#--- keys added by config migration ---\n" << append;
+	}
+}
+
 bool CConfig::init()
 {
 	if (!createFile())
@@ -149,6 +248,29 @@ void CConfig::setError(const ELoadError err, const char* keyName)
 bool CConfig::loadSettings(const bool firstLoad, const bool silent)
 {
 	rootNode = YAML::Node();
+
+	// Bring an older config up to the current schema before parsing it, so new
+	// keys arrive with their documented defaults instead of a warning each.
+	{
+		std::error_code ec;
+		const auto version = [&]() -> int32_t {
+			try
+			{
+				const auto node = YAML::LoadFile(getPath())["ConfigVersion"];
+				return node ? node.as<int32_t>() : 0;
+			}
+			catch (...)
+			{
+				return 0;
+			}
+		}();
+
+		if (version < kConfigVersion && std::filesystem::exists(getPath(), ec))
+		{
+			migrateConfig(getPath());
+			LOG_INFO("Config migrated to schema version %i\n", kConfigVersion);
+		}
+	}
 
 	try
 	{

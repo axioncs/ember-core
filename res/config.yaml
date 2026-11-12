@@ -163,3 +163,6 @@ DumpClientInterfaces: no
 
 #Logs all calls to Steamworks (this makes the logfile huge! Only useful for debugging/analyzing
 ExtendedLogging: no
+
+#Schema version of this file. Older files get the missing keys appended on load.
+ConfigVersion: 1

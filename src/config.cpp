@@ -2,6 +2,7 @@
 #include "config_default.hpp"
 
 #include "feats/apps.hpp"
+#include "feats/manifeststore.hpp"
 #include "feats/stplugin.hpp"
 
 #include "filewatcher.hpp"
@@ -214,6 +215,10 @@ bool CConfig::loadSettings(const bool firstLoad, const bool silent)
 	// and manifest pins. Merged after setAdditionalApps because that call
 	// overwrites addedAppIds wholesale.
 	StPlugin::mergeInto(StPlugin::parseAll());
+
+	// Pins are useless without the manifest files; publish whatever the store
+	// holds into depotcache before Steam resolves the depots.
+	ManifestStore::publish();
 
 	//Do not log the keys themself
 	for (const auto& key : cdKeys.copy())

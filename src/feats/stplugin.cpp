@@ -7,35 +7,119 @@
 #include "../log.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <fstream>
 #include <mutex>
-#include <regex>
 #include <system_error>
 
 namespace
 {
-	// Anchored on a whole, comment-stripped line. The bare form must not match
-	// the three-argument form, hence the immediate closing parenthesis.
-	const std::regex kAddAppIdBare(R"(^addappid\(\s*(\d+)\s*\)$)");
-	const std::regex kAddAppIdKey(R"(^addappid\(\s*(\d+)\s*,\s*\d+\s*,\s*"([0-9A-Fa-f]{64})"\s*\)$)");
-	const std::regex kSetManifestId(R"(^setmanifestid\(\s*(\d+)\s*,\s*"(\d+)"\s*\)$)");
-	const std::regex kInlineComment(R"(\s*--.*$)");
-
 	std::mutex g_mutex;
 	StPlugin::Import_t g_current;
 
-	std::string stripComment(std::string line)
+	const char* kWhitespace = " \t\r\n";
+
+	std::string trim(const std::string& value)
 	{
-		line = std::regex_replace(line, kInlineComment, "");
-		// Trim; the file may use CRLF or tabs.
-		const auto first = line.find_first_not_of(" \t\r\n");
+		const auto first = value.find_first_not_of(kWhitespace);
 		if (first == std::string::npos)
 		{
 			return {};
 		}
-		const auto last = line.find_last_not_of(" \t\r\n");
-		return line.substr(first, last - first + 1);
+		const auto last = value.find_last_not_of(kWhitespace);
+		return value.substr(first, last - first + 1);
+	}
+
+	// Strip a Lua line comment. A '--' inside a quoted depot key would be
+	// meaningless anyway (keys are hex), so a plain search is sufficient.
+	std::string stripComment(const std::string& line)
+	{
+		const auto comment = line.find("--");
+		return trim(comment == std::string::npos ? line : line.substr(0, comment));
+	}
+
+	// Split "a, b, \"c\"" into {"a", "b", "c"} with surrounding quotes removed.
+	std::vector<std::string> splitArgs(const std::string& args)
+	{
+		std::vector<std::string> out;
+		std::string current;
+		bool inQuotes = false;
+		for (const char ch : args)
+		{
+			if (ch == '"')
+			{
+				inQuotes = !inQuotes;
+				continue;
+			}
+			if (ch == ',' && !inQuotes)
+			{
+				out.push_back(trim(current));
+				current.clear();
+				continue;
+			}
+			current += ch;
+		}
+		out.push_back(trim(current));
+		return out;
+	}
+
+	bool allDigits(const std::string& value)
+	{
+		return !value.empty() && std::all_of(value.begin(), value.end(), [](unsigned char c) {
+			return c >= '0' && c <= '9';
+		});
+	}
+
+	bool isDepotKey(const std::string& value)
+	{
+		return value.size() == 64 && std::all_of(value.begin(), value.end(), [](unsigned char c) {
+			return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+		});
+	}
+
+	// name(arg, ...) — returns false for anything that is not a single call.
+	bool parseCall(const std::string& line, std::string& name, std::vector<std::string>& args)
+	{
+		const auto open = line.find('(');
+		const auto close = line.rfind(')');
+		if (open == std::string::npos || close == std::string::npos || close < open)
+		{
+			return false;
+		}
+		name = trim(line.substr(0, open));
+		args = splitArgs(line.substr(open + 1, close - open - 1));
+		return !name.empty();
+	}
+
+	void applyCall(const std::string& name, const std::vector<std::string>& args, StPlugin::Import_t& out)
+	{
+		std::string lowered = name;
+		std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char c) {
+			return static_cast<char>(std::tolower(c));
+		});
+
+		if (lowered == "addappid")
+		{
+			if (args.size() == 1 && allDigits(args[0]))
+			{
+				out.appIds.insert(static_cast<AppId_t>(std::stoul(args[0])));
+				return;
+			}
+			if (args.size() == 3 && allDigits(args[0]) && isDepotKey(args[2]))
+			{
+				out.depotKeys[static_cast<AppId_t>(std::stoul(args[0]))] = args[2];
+			}
+			return;
+		}
+
+		if (lowered == "setmanifestid")
+		{
+			if (args.size() == 2 && allDigits(args[0]) && allDigits(args[1]))
+			{
+				out.manifestIds[static_cast<AppId_t>(std::stoul(args[0]))] = std::stoull(args[1]);
+			}
+		}
 	}
 
 	void parseFile(const std::filesystem::path& path, StPlugin::Import_t& out)
@@ -56,22 +140,16 @@ namespace
 				continue;
 			}
 
-			std::smatch match;
+			std::string name;
+			std::vector<std::string> args;
+			if (!parseCall(line, name, args))
+			{
+				continue;
+			}
+
 			try
 			{
-				if (std::regex_match(line, match, kAddAppIdBare))
-				{
-					out.appIds.insert(static_cast<AppId_t>(std::stoul(match[1].str())));
-				}
-				else if (std::regex_match(line, match, kAddAppIdKey))
-				{
-					out.depotKeys[static_cast<AppId_t>(std::stoul(match[1].str()))] = match[2].str();
-				}
-				else if (std::regex_match(line, match, kSetManifestId))
-				{
-					out.manifestIds[static_cast<AppId_t>(std::stoul(match[1].str()))] =
-						std::stoull(match[2].str());
-				}
+				applyCall(name, args, out);
 			}
 			catch (const std::exception& e)
 			{
@@ -95,7 +173,7 @@ std::vector<std::filesystem::path> StPlugin::scriptDirs()
 		std::filesystem::path(home) / ".local" / "share" / "Steam",
 	};
 
-	std::vector<std::filesystem::path> seen;
+	std::vector<std::string> seen;
 	for (const auto& root : roots)
 	{
 		auto dir = root / "config" / "stplug-in";
@@ -150,7 +228,7 @@ void StPlugin::mergeInto(Import_t const& import)
 
 	// setAdditionalApps() overwrites addedAppIds on every load, so union rather
 	// than insert-into-live: the config list stays authoritative for its own
-	// entries, and stplug-in ids are re-added each reload.
+	// entries, and stplug-in ids are re-added on each reload.
 	auto ids = g_config.addedAppIds.copy();
 	const auto before = ids.size();
 	ids.insert(import.appIds.begin(), import.appIds.end());

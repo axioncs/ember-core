@@ -8,10 +8,12 @@
 #include "stplugin.hpp"
 
 #include <cmath>
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -116,6 +118,89 @@ namespace
 		return true;
 	}
 
+	// The client's content language, from HKCU\Software\Valve\Steam\language in its
+	// registry file. Steam uses the same setting to pick depots, so a depot whose
+	// appinfo config names a different language is not part of the install.
+	// Read once: changing it needs a client restart anyway.
+	const std::string& clientLanguage()
+	{
+		static const std::string language = [] {
+			const char* home = getenv("HOME");
+			if (!home)
+			{
+				return std::string();
+			}
+
+			const std::filesystem::path candidates[] = {
+				std::filesystem::path(home) / ".steam" / "registry.vdf",
+				std::filesystem::path(home) / ".local" / "share" / "Steam" / "registry.vdf",
+			};
+
+			for (const auto& path : candidates)
+			{
+				std::ifstream file(path);
+				if (!file.is_open())
+				{
+					continue;
+				}
+
+				std::string line;
+				while (std::getline(file, line))
+				{
+					const auto first = line.find_first_not_of(" 	");
+					if (first == std::string::npos || line.compare(first, 10, "\"language\"") != 0)
+					{
+						continue;
+					}
+
+					const auto open = line.find('"', first + 10);
+					if (open == std::string::npos)
+					{
+						continue;
+					}
+					const auto close = line.find('"', open + 1);
+					if (close == std::string::npos)
+					{
+						continue;
+					}
+
+					return line.substr(open + 1, close - open - 1);
+				}
+			}
+
+			return std::string();
+		}();
+
+		return language;
+	}
+
+	// Empty when the app has no appinfo loaded, or the depot has no language
+	// config: both mean "cannot tell", and the depot is kept.
+	std::string depotLanguage(const AppId_t appId, const AppId_t depotId)
+	{
+		const auto user = g_pSteamEngine ? g_pSteamEngine->getUser() : nullptr;
+		if (!user)
+		{
+			return {};
+		}
+
+		const auto appInfo = user->getClientApps();
+		if (!appInfo)
+		{
+			return {};
+		}
+
+		const auto key = "depots/" + std::to_string(depotId) + "/config/language";
+		char buf[64] {};
+
+		if (appInfo->getAppData(appId, key.c_str(), buf, sizeof(buf)) <= 0)
+		{
+			return {};
+		}
+
+		return buf;
+	}
+
 	// One entry per depot the app's own script pins to a manifest. Pins without a
 	// manifest id are useless here: the plan asserts a valid manifest id, and
 	// Steam would have to ask the server for one, which it denies for an unowned
@@ -147,12 +232,15 @@ namespace
 				pins.size() - pinned, pins.size(), appId);
 		}
 
-		if (!growDepotVector(depots, static_cast<uint32_t>(pinned)))
-		{
-			return 0;
-		}
+		// A script pins every depot the app has, including one per language. Steam
+		// picks by the client's language, so do the same: a depot whose appinfo
+		// names another language is not part of this install.
+		const auto& language = clientLanguage();
+		size_t localised = 0;
+		size_t dropped = 0;
+		std::vector<const StPlugin::DepotPin_t*> keep;
+		keep.reserve(pinned);
 
-		uint32_t written = 0;
 		for (const auto& pin : pins)
 		{
 			if (!pin.manifestId)
@@ -160,15 +248,54 @@ namespace
 				continue;
 			}
 
+			if (!language.empty())
+			{
+				const auto depotLang = depotLanguage(appId, pin.depotId);
+				if (!depotLang.empty())
+				{
+					++localised;
+					if (depotLang != language)
+					{
+						++dropped;
+						continue;
+					}
+				}
+			}
+
+			keep.push_back(&pin);
+		}
+
+		if (!language.empty())
+		{
+			// localised == 0 means the appinfo carries no depot language config (or
+			// no appinfo at all), so nothing could be filtered.
+			LOG_INFO("Depot plan: app %u: %zu of %zu depot(s) localised, %zu dropped for language '%s'\n",
+				appId, localised, pinned, dropped, language.c_str());
+		}
+
+		if (keep.empty())
+		{
+			LOG_INFO("Depot plan: app %u: nothing left after language filtering, plan stays empty\n", appId);
+			return 0;
+		}
+
+		if (!growDepotVector(depots, static_cast<uint32_t>(keep.size())))
+		{
+			return 0;
+		}
+
+		uint32_t written = 0;
+		for (const auto* pin : keep)
+		{
 			// Same shape the client itself builds: depot, app, manifest, size, rest
 			// zero. The size is what the caller sums into the install size, so a
 			// plan without it reads as 0 B.
 			DepotInfo_t& entry = depots->mem.base[written];
 			memset(&entry, 0, sizeof(entry));
-			entry.depotId = pin.depotId;
+			entry.depotId = pin->depotId;
 			entry.appId = appId;
-			entry.manifestId = pin.manifestId;
-			entry.size = pin.size;
+			entry.manifestId = pin->manifestId;
+			entry.size = pin->size;
 			++written;
 		}
 

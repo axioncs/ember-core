@@ -112,7 +112,9 @@ namespace
 
 		if (lowered == "setmanifestid")
 		{
-			if (args.size() == 2 && allDigits(args[0]) && allDigits(args[1]))
+			// Two-argument form, plus a three-argument form carrying the
+			// manifest size that some archives emit.
+			if ((args.size() == 2 || args.size() == 3) && allDigits(args[0]) && allDigits(args[1]))
 			{
 				out.manifestIds[static_cast<AppId_t>(std::stoul(args[0]))] = std::stoull(args[1]);
 			}

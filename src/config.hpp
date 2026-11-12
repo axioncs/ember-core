@@ -60,6 +60,7 @@ public:
 	MTVariable<std::unordered_map<AppId_t, AppId_t>> fakeAppIds;
 	MTVariable<std::unordered_map<AppId_t, uint64_t>> manifestIds;
 	MTVariable<std::unordered_set<AppId_t>> depotBlacklist;
+	MTVariable<std::string> depotLanguages;
 	MTVariable<FakeGame_t> idleStatus;
 	MTVariable<std::unordered_map<AppId_t, std::string>> gameTitles;
 	MTVariable<std::unordered_map<AppId_t, uint32_t>> subscriptionTimestamps;

@@ -199,6 +199,7 @@ bool CConfig::loadSettings(const bool firstLoad, const bool silent)
 	appIds = getList<AppId_t>(rootNode, "AppIds");
 	fakeOffline = getList<AppId_t>(rootNode, "FakeOffline");
 	depotBlacklist = getList<AppId_t>(rootNode, "DepotBlacklist");
+	depotLanguages = getSetting<std::string>(rootNode, "DepotLanguages", "");
 
 	fakeAppIds = getMap<AppId_t, AppId_t>(rootNode, "FakeAppIds");
 	manifestIds = getMap<AppId_t, uint64_t>(rootNode, "ManifestIds");

@@ -68,6 +68,12 @@ ManifestIds:
 #Never download these depots
 DepotBlacklist:
 
+#Depots whose appinfo language is not in this list are not installed.
+#Comma separated, appinfo names: english, japanese, german, french, ...
+#Empty = use the client's language. English audio usually lives in the main
+#content depot, so listing english only drops every speech pack.
+DepotLanguages: ""
+
 #Custom ingame statuses. Set AppId to 0 to disable
 IdleStatus:
   AppId: 0

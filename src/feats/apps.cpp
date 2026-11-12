@@ -7,6 +7,8 @@
 #include "fakeappid.hpp"
 #include "stplugin.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -174,9 +176,9 @@ namespace
 		return language;
 	}
 
-	// Empty when the app has no appinfo loaded, or the depot has no language
-	// config: both mean "cannot tell", and the depot is kept.
-	std::string depotLanguage(const AppId_t appId, const AppId_t depotId)
+	// Empty when the app has no appinfo loaded, or the depot has no such config:
+	// both mean "cannot tell", and the depot is kept.
+	std::string depotConfig(const AppId_t appId, const AppId_t depotId, const char* name)
 	{
 		const auto user = g_pSteamEngine ? g_pSteamEngine->getUser() : nullptr;
 		if (!user)
@@ -190,7 +192,7 @@ namespace
 			return {};
 		}
 
-		const auto key = "depots/" + std::to_string(depotId) + "/config/language";
+		const auto key = "depots/" + std::to_string(depotId) + "/config/" + name;
 		char buf[64] {};
 
 		if (appInfo->getAppData(appId, key.c_str(), buf, sizeof(buf)) <= 0)
@@ -199,6 +201,44 @@ namespace
 		}
 
 		return buf;
+	}
+
+	// DepotLanguages from config, else the client's language. Empty means "no
+	// filtering": a depot whose language cannot be read is kept either way.
+	std::vector<std::string> acceptedLanguages()
+	{
+		std::vector<std::string> languages;
+
+		const auto configured = g_config.depotLanguages.copy();
+		if (!configured.empty())
+		{
+			for (auto part : Utils::strsplit(configured, ","))
+			{
+				const auto first = part.find_first_not_of(" 	");
+				if (first == std::string::npos)
+				{
+					continue;
+				}
+
+				const auto last = part.find_last_not_of(" 	");
+				part = part.substr(first, last - first + 1);
+				std::transform(part.begin(), part.end(), part.begin(), [](unsigned char c) {
+					return static_cast<char>(std::tolower(c));
+				});
+
+				languages.push_back(part);
+			}
+
+			return languages;
+		}
+
+		const auto& client = clientLanguage();
+		if (!client.empty())
+		{
+			languages.push_back(client);
+		}
+
+		return languages;
 	}
 
 	// One entry per depot the app's own script pins to a manifest. Pins without a
@@ -232,12 +272,14 @@ namespace
 				pins.size() - pinned, pins.size(), appId);
 		}
 
-		// A script pins every depot the app has, including one per language. Steam
-		// picks by the client's language, so do the same: a depot whose appinfo
-		// names another language is not part of this install.
-		const auto& language = clientLanguage();
+		// A script pins every depot the app has: one per language, and the macOS
+		// set as well. Steam installs neither, so apply the same two filters it
+		// does — oslist must cover this platform, and the depot language must be
+		// one we accept.
+		const auto languages = acceptedLanguages();
 		size_t localised = 0;
-		size_t dropped = 0;
+		size_t droppedLanguage = 0;
+		size_t droppedPlatform = 0;
 		std::vector<const StPlugin::DepotPin_t*> keep;
 		keep.reserve(pinned);
 
@@ -248,15 +290,22 @@ namespace
 				continue;
 			}
 
-			if (!language.empty())
+			const auto osList = depotConfig(appId, pin.depotId, "oslist");
+			if (!osList.empty() && osList.find("windows") == std::string::npos && osList.find("linux") == std::string::npos)
 			{
-				const auto depotLang = depotLanguage(appId, pin.depotId);
+				++droppedPlatform;
+				continue;
+			}
+
+			if (!languages.empty())
+			{
+				const auto depotLang = depotConfig(appId, pin.depotId, "language");
 				if (!depotLang.empty())
 				{
 					++localised;
-					if (depotLang != language)
+					if (std::find(languages.begin(), languages.end(), depotLang) == languages.end())
 					{
-						++dropped;
+						++droppedLanguage;
 						continue;
 					}
 				}
@@ -265,13 +314,16 @@ namespace
 			keep.push_back(&pin);
 		}
 
-		if (!language.empty())
+		std::string accepted;
+		for (const auto& language : languages)
 		{
-			// localised == 0 means the appinfo carries no depot language config (or
-			// no appinfo at all), so nothing could be filtered.
-			LOG_INFO("Depot plan: app %u: %zu of %zu depot(s) localised, %zu dropped for language '%s'\n",
-				appId, localised, pinned, dropped, language.c_str());
+			accepted += (accepted.empty() ? "" : ",") + language;
 		}
+
+		// localised == 0 means the appinfo carries no depot language config (or no
+		// appinfo at all), so nothing could be filtered.
+		LOG_INFO("Depot plan: app %u: %zu of %zu depot(s) localised, %zu dropped for language [%s], %zu dropped for platform\n",
+			appId, localised, pinned, droppedLanguage, accepted.c_str(), droppedPlatform);
 
 		if (keep.empty())
 		{

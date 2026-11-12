@@ -25,6 +25,16 @@
 bool Apps::applistRequested;
 std::unordered_set<AppId_t> Apps::privateApps = std::unordered_set<AppId_t>();
 
+namespace
+{
+	bool allDigits(const std::string& value)
+	{
+		return !value.empty() && std::all_of(value.begin(), value.end(), [](unsigned char c) {
+			return c >= '0' && c <= '9';
+		});
+	}
+}
+
 std::mutex Apps::pendingLicenseChangesMutex;
 std::unordered_set<AppId_t> Apps::pendingLicenseChanges = std::unordered_set<AppId_t>();
 
@@ -335,7 +345,19 @@ namespace
 		size_t localised = 0;
 		size_t droppedLanguage = 0;
 		size_t droppedPlatform = 0;
-		std::vector<const StPlugin::DepotPin_t*> keep;
+		size_t droppedEmpty = 0;
+		size_t droppedForeign = 0;
+
+		// The size may come from the script or, when it carries none, from the
+		// appinfo's public manifest entry.
+		struct KeptDepot_t
+		{
+			AppId_t depotId;
+			uint64_t manifestId;
+			uint64_t size;
+		};
+
+		std::vector<KeptDepot_t> keep;
 		keep.reserve(pinned);
 
 		for (const auto& pin : pins)
@@ -366,7 +388,37 @@ namespace
 				}
 			}
 
-			keep.push_back(&pin);
+			// A depot provided by another app is not this app's content.
+			const auto fromApp = configFor(pin.depotId, "depotfromapp");
+			if (!fromApp.empty() && allDigits(fromApp) && std::stoul(fromApp) != appId)
+			{
+				++droppedForeign;
+				continue;
+			}
+
+			// The script's size is authoritative when present; otherwise take the
+			// public manifest size from appinfo so the install total is right.
+			uint64_t size = pin.size;
+			bool sizeKnown = size != 0;
+			if (!sizeKnown)
+			{
+				const auto sizeText = configFor(pin.depotId, "manifests/public/size");
+				if (!sizeText.empty() && allDigits(sizeText))
+				{
+					size = std::stoull(sizeText);
+					sizeKnown = true;
+				}
+			}
+
+			// A depot we can prove is empty has nothing to install, and its stub
+			// manifest trips an assert in the client's manifest loader.
+			if (sizeKnown && size == 0)
+			{
+				++droppedEmpty;
+				continue;
+			}
+
+			keep.push_back({ pin.depotId, pin.manifestId, size });
 		}
 
 		std::string accepted;
@@ -377,15 +429,15 @@ namespace
 
 		// localised == 0 means the appinfo carries no depot language config (or no
 		// appinfo at all), so nothing could be filtered.
-		LOG_INFO("Depot plan: app %u: %zu of %zu depot(s) localised, %zu dropped for language [%s], %zu dropped for platform\n",
-			appId, localised, pinned, droppedLanguage, accepted.c_str(), droppedPlatform);
+		LOG_INFO("Depot plan: app %u: %zu of %zu depot(s) localised, %zu dropped for language [%s], %zu dropped for platform, %zu empty, %zu provided by another app\n",
+			appId, localised, pinned, droppedLanguage, accepted.c_str(), droppedPlatform, droppedEmpty, droppedForeign);
 
 		// The depot list itself, once per distinct plan: DEBUG is stripped from
 		// release builds, so this is the only way to see what the plan contains.
 		std::string plan;
-		for (const auto* pin : keep)
+		for (const auto& depot : keep)
 		{
-			plan += (plan.empty() ? "" : ",") + std::to_string(pin->depotId);
+			plan += (plan.empty() ? "" : ",") + std::to_string(depot.depotId);
 		}
 
 		{
@@ -412,17 +464,17 @@ namespace
 		}
 
 		uint32_t written = 0;
-		for (const auto* pin : keep)
+		for (const auto& depot : keep)
 		{
 			// Same shape the client itself builds: depot, app, manifest, size, rest
 			// zero. The size is what the caller sums into the install size, so a
 			// plan without it reads as 0 B.
 			DepotInfo_t& entry = depots->mem.base[written];
 			memset(&entry, 0, sizeof(entry));
-			entry.depotId = pin->depotId;
+			entry.depotId = depot.depotId;
 			entry.appId = appId;
-			entry.manifestId = pin->manifestId;
-			entry.size = pin->size;
+			entry.manifestId = depot.manifestId;
+			entry.size = depot.size;
 			++written;
 		}
 

@@ -34,15 +34,18 @@ public:
 
 	bool resize(const size_t newSize)
 	{
+		// newSize is an element count; the allocator works in bytes, and alloc
+		// must track the new capacity or the next grow reallocates from a lie.
+		const size_t bytes = newSize * sizeof(T);
 		void* mem;
 
 		if (base)
 		{
-			mem = Steam::Plat_Realloc(base, newSize);
+			mem = Steam::Plat_Realloc(base, bytes);
 		}
 		else
 		{
-			mem = Steam::Plat_Alloc(newSize);
+			mem = Steam::Plat_Alloc(bytes);
 		}
 
 		if (!mem)
@@ -51,6 +54,7 @@ public:
 		}
 
 		base = reinterpret_cast<T*>(mem);
+		alloc = static_cast<uint32_t>(newSize);
 		return true;
 	}
 }; //0x10

@@ -445,7 +445,7 @@ uint32_t Apps::buildDepotDependency(const AppId_t appId, CUtlVector<DepotInfo_t>
 	const auto depotBlacklist = g_config.depotBlacklist.get();
 	const auto manifestOverrides = g_config.manifestIds.get();
 
-	for (unsigned int i = 0; i < depots->size; i++)
+	for (unsigned int i = 0; i < depots->size; )
 	{
 		const auto depot = depots->at(i);
 
@@ -454,6 +454,8 @@ uint32_t Apps::buildDepotDependency(const AppId_t appId, CUtlVector<DepotInfo_t>
 			LOG_DEBUG("Removing %u with %lu\n", depot->depotId, depot->manifestId);
 			depots->swap(i, depots->size - 1);
 			depots->size--;
+			// The element swapped into i has not been examined yet.
+			continue;
 		}
 
 		if (manifestOverrides->contains(depot->depotId))
@@ -464,6 +466,7 @@ uint32_t Apps::buildDepotDependency(const AppId_t appId, CUtlVector<DepotInfo_t>
 		}
 
 		LOG_DEBUG("Depot %u for %u -> %lu\n", depot->depotId, depot->appId, depot->manifestId);
+		++i;
 	}
 
 	for (unsigned int i = 0; i < sharedDepots->size; i++)
@@ -479,7 +482,8 @@ bool Apps::checkAppOwnership(const AppId_t appId, AppOwnershipInfo_t* pInfo)
 {
 	if (!g_currentSteamId.isSet())
 	{
-		LOG_NOTIFYWARN("Ownership check for %u skipped: SteamID not captured yet\n", appId);
+		// Expected before login completes; a notification per call would spam.
+		LOG_ONCE("Ownership check for %u skipped: SteamID not captured yet\n", appId);
 		return false;
 	}
 

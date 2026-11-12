@@ -117,6 +117,7 @@ namespace VFTIndexes
 
 	namespace IClientUser
 	{
+		extern VFTableInfo_t BIsSubscribedApp;
 		extern VFTableInfo_t BLoggedOn;
 		extern VFTableInfo_t BUpdateAppOwnershipTicket;
 		extern VFTableInfo_t GetAppOwnershipTicketExtendedData;

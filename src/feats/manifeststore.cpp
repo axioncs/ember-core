@@ -20,6 +20,24 @@ namespace
 		});
 	}
 
+	// Steam's content manifest starts with the 32-bit magic 0x71F617D0.
+	bool looksLikeManifest(const std::filesystem::path& path)
+	{
+		std::ifstream file(path, std::ios::binary);
+		if (!file.is_open())
+		{
+			return false;
+		}
+
+		unsigned char magic[4] = {};
+		if (!file.read(reinterpret_cast<char*>(magic), sizeof(magic)))
+		{
+			return false;
+		}
+
+		return magic[0] == 0xd0 && magic[1] == 0x17 && magic[2] == 0xf6 && magic[3] == 0x71;
+	}
+
 	// <depot>_<gid>.manifest
 	bool isManifestName(const std::string& name)
 	{
@@ -94,11 +112,12 @@ void ManifestStore::publish()
 			continue;
 		}
 
-		// A zero-byte manifest is never valid and Steam will fail to mount it.
+		// A manifest that is empty, or does not start with Steam's content-manifest
+		// magic, would fail to mount — refuse it rather than stage it.
 		const auto size = std::filesystem::file_size(entry.path(), ec);
-		if (ec || size == 0)
+		if (ec || size == 0 || !looksLikeManifest(entry.path()))
 		{
-			LOG_NOTIFYWARN("ManifestStore: refusing empty %s\n", name.c_str());
+			LOG_NOTIFYWARN("ManifestStore: refusing %s (empty or not a manifest)\n", name.c_str());
 			continue;
 		}
 

@@ -101,6 +101,7 @@ bool Apps::checkAppOwnership(const AppId_t appId, AppOwnershipInfo_t* pInfo)
 {
 	if (!g_currentSteamId.isSet())
 	{
+		LOG_NOTIFYWARN("Ownership check for %u skipped: SteamID not captured yet\n", appId);
 		return false;
 	}
 

@@ -176,7 +176,6 @@ namespace Hooks
 
 	typedef bool(*CUDPConnection_BAsyncSend_t)(CUDPConnection*, void*, steamsize_t, bool);
 
-	typedef bool(*CUser_BIsSubscribedApp_t)(CUser*, AppId_t);
 	typedef bool(*CUser_CheckAppOwnership_t)(CUser*, AppId_t, AppOwnershipInfo_t*);
 	typedef uint32_t(*CUser_GetSubscribedApps_t)(CUser*, AppId_t*, uint32_t, uint8_t);
 	typedef uint32_t(*CUser_PostCallbackToAppId_t)(CUser*, AppId_t, ECallbackType, void*, steamsize_t);
@@ -210,7 +209,6 @@ namespace Hooks
 
 	extern DetourHook<CUDPConnection_BAsyncSend_t>* CUDPConnection_BAsyncSend;
 
-	extern DetourHook<CUser_BIsSubscribedApp_t>* CUser_BIsSubscribedApp;
 	extern DetourHook<CUser_CheckAppOwnership_t>* CUser_CheckAppOwnership;
 	extern DetourHook<CUser_GetSubscribedApps_t>* CUser_GetSubscribedApps;
 	extern DetourHook<CUser_PostCallbackToAppId_t>* CUser_PostCallbackToAppId;

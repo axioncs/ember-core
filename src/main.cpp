@@ -240,18 +240,21 @@ static void load()
 		LOG_NOTIFYERROR("Failed to parse VFTables! Aborting...");
 		return;
 	}
+	LOG_INFO("VFTables resolved\n");
 
 	if (!Patterns::init())
 	{
 		LOG_NOTIFYERROR("Failed to find all patterns! Aborting...");
 		return;
 	}
+	LOG_INFO("Patterns resolved\n");
 
 	if (!Hooks::init())
 	{
 		LOG_NOTIFYERROR("Failed to setup & place hooks! Aborting...");
 		return;
 	}
+	LOG_INFO("Hooks placed\n");
 
 	Lua::init(true);
 	SLSAPI::init();

@@ -2,6 +2,7 @@
 #include "config_default.hpp"
 
 #include "feats/apps.hpp"
+#include "feats/stplugin.hpp"
 
 #include "filewatcher.hpp"
 #include "log.hpp"
@@ -203,6 +204,11 @@ bool CConfig::loadSettings(const bool firstLoad, const bool silent)
 	launchOptions = getMap<AppId_t, std::string>(rootNode, "LaunchOptions");
 
 	setAdditionalApps(getList<AppId_t>(rootNode, "AdditionalApps"), firstLoad);
+
+	// stplug-in scripts are the self-maintaining source of app ids, depot keys
+	// and manifest pins. Merged after setAdditionalApps because that call
+	// overwrites addedAppIds wholesale.
+	StPlugin::mergeInto(StPlugin::parseAll());
 
 	//Do not log the keys themself
 	for (const auto& key : cdKeys.copy())

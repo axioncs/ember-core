@@ -160,12 +160,15 @@ namespace
 				continue;
 			}
 
-			// Same shape the client itself builds: depot, app, manifest, rest zero.
+			// Same shape the client itself builds: depot, app, manifest, size, rest
+			// zero. The size is what the caller sums into the install size, so a
+			// plan without it reads as 0 B.
 			DepotInfo_t& entry = depots->mem.base[written];
 			memset(&entry, 0, sizeof(entry));
 			entry.depotId = pin.depotId;
 			entry.appId = appId;
 			entry.manifestId = pin.manifestId;
+			entry.size = pin.size;
 			++written;
 		}
 
@@ -175,13 +178,14 @@ namespace
 	}
 }
 
-void Apps::buildDepotDependency(const AppId_t appId, CUtlVector<DepotInfo_t>* depots, CUtlVector<DepotInfo_t>* sharedDepots)
+uint32_t Apps::buildDepotDependency(const AppId_t appId, CUtlVector<DepotInfo_t>* depots, CUtlVector<DepotInfo_t>* sharedDepots)
 {
 	LOG_DEBUG("Vec Alloc %u, Grow %u, Size %u\n", depots->mem.alloc, depots->mem.growSize, depots->size);
 
+	uint32_t synthesised = 0;
 	if (depots->size == 0 && g_config.isAddedAppId(appId))
 	{
-		synthesiseDepotPlan(appId, depots);
+		synthesised = synthesiseDepotPlan(appId, depots);
 	}
 
 	const auto depotBlacklist = g_config.depotBlacklist.get();
@@ -213,6 +217,8 @@ void Apps::buildDepotDependency(const AppId_t appId, CUtlVector<DepotInfo_t>* de
 		const auto depot = sharedDepots->at(i);
 		LOG_DEBUG("Shared Depot %u for %u -> %lu\n", depot->depotId, depot->appId, depot->manifestId);
 	}
+
+	return synthesised;
 }
 
 bool Apps::checkAppOwnership(const AppId_t appId, AppOwnershipInfo_t* pInfo)

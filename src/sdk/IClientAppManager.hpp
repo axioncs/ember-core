@@ -40,8 +40,8 @@ SDK_Struct DepotInfo_t
 	AppId_t depotId;			//0x0
 	AppId_t appId;				//0x4
 	uint64_t manifestId;		//0x8  asserted != k_uManifestIdInvalid
-	uint64_t unk0x10;			//0x10 meaning unconfirmed; the client leaves it 0
-	uint32_t unk0x18;			//0x18
+	uint64_t size;				//0x10 summed into the install size by the caller
+	uint32_t unk0x18;			//0x18 gates a second size accumulator; the client writes 0
 	uint8_t unk0x1C;			//0x1C
 	uint8_t unk0x1D;			//0x1D
 	uint8_t unk0x1E;			//0x1E

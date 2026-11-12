@@ -800,9 +800,18 @@ static bool hkUserAppManager_BuildDepotDependency
 		success
 	);
 
-	Apps::buildDepotDependency(appId, depots, sharedDepots);
+	const uint32_t synthesised = Apps::buildDepotDependency(appId, depots, sharedDepots);
 
-	return success;
+	// Every caller of this function bails on a false return before it looks at the
+	// vector (e.g. 0x107ad0d: test %al,%al / je <free both vectors>), and the
+	// original answers false for an app it cannot build a plan for. When ember
+	// supplied the plan, the answer is yes.
+	if (synthesised && !success)
+	{
+		LOG_INFO("Depot plan: app %u: original returned no plan, handing back %u depot(s) as success\n", appId, synthesised);
+	}
+
+	return success || synthesised;
 }
 
 static bool hkClientAppManager_BCanRemotePlayTogether(IClientAppManager* pAppManager, AppId_t appId)

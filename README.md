@@ -1,60 +1,72 @@
-# **SLSsteam - Steamclient Modification for Linux**
-![](https://github.com/AceSLS/SLSsteam/blob/dev/res/banner.png?raw=true "SLSsteam")
+# ember-core
 
-## Index
+The shared library behind [ember](https://github.com/axioncs/ember). Steam loads it
+at startup and it answers Steam's ownership and licence questions, builds install
+plans for apps the account does not own, supplies depot keys, and stages manifests.
 
-1. [Getting started](#getting-started)
-2. [Hall of Fame 👑](#hall-of-fame-aka-credits)
-3. [Hall of Shame 🚨](#hall-of-shame-aka-scammers-leechers-etc)
-4. [Support](#support)
-5. [Related Projects](#related-projects)
+A fork of [AceSLS/SLSsteam](https://github.com/AceSLS/SLSsteam), branch `ember`,
+based on its `dev-multiarch` work. Everything below in *What this fork adds* is ours;
+the rest is upstream's and stays theirs.
 
-## Getting started
+## What this fork adds
 
-Check out the [Installation](https://github.com/AceSLS/SLSsteam/wiki/Installation) or the [Building from Source](https://github.com/AceSLS/SLSsteam/wiki/Building-from-Source) section in our Wiki!
+- **stplug-in importer** — reads `~/.steam/steam/config/stplug-in/*.lua` for app
+  ids, depot keys and manifest pins, and reloads when the folder changes.
+- **Depot plan synthesis** — Steam returns an empty depot list for unowned apps, so
+  the plan is built from the imported pins, filtered by appinfo `oslist`,
+  `language` and `baselanguages`, and split into normal and shared depots.
+- **Manifest store publishing** — copies staged manifests into Steam's depot cache
+  on every config load, refusing anything that is not a real manifest.
+- **Ticket stamp** — stamps denied ownership-ticket responses so the downloader
+  proceeds.
+- **Depot key substitution** — supplies an imported key if the CM ever refuses one.
+- **Crash guard** — a marker written before hooks are placed; if it survives, the
+  next start runs vanilla so the client is always reachable.
+- **Ownership SteamID fix** — ignores the anonymous sentinel the client returns
+  before login, which otherwise disables every ownership check.
+- **Diagnostics** — names each code signature that fails to resolve after a Steam
+  update.
 
+## Build
 
-## Hall of Fame aka Credits
+Requires `g++`, `make`, `pkg-config`, and the development files for `libcurl`,
+`dbus-1` and `luajit`.
 
-Contributors:
-- [Parasitic-Hollow](https://github.com/Parasitic-Hollow/): Fixing gamepad issues caused by FakeAppIds & maintaining SLSsteam in my absence
-- [exefer](https://github.com/exefer): Fixing playtime getting deleted on Steamclient restart for refunded games
-- [dankrr](https://github.com/dankrr): Fixing non-steam game's rich presence
-- [amione](https://github.com/xamionex/): Creating the SLSsteam banner & logo the instant he found out I was looking around for one <3
-- [DeveloperMikey](https://github.com/DeveloperMikey): Added Nix support
-- [skrimix](https://github.com/skrimix): Added flatpak support
-- thismanq: Informing me that DisableFamilyShareLockForOthers is possible
-- [Linux-pro-developer](https://github.com/Linux-pro-developer): Informing me that you can bypass ingame limitations by hiding the family share status
+```sh
+make audit-libs        # produces bin/SLSsteam.so
+```
 
-Others:
-- Riku_Wayfinder: Being extremely supportive and lightening my workload by a lot. So show him some love my guys <3
-- Gnanf: Helping me test the Family Sharing bypass
-- rdbo: For his great libmem library, which saved me a lot of development and learning time
-- jbeder: For the awesome yaml-cpp library which allowed me to easily add a configuration file
-- oleavr and all the other awesome people working on Frida for easy instrumentation which helps a lot in analyzing, testing and debugging
-- All the folks working on Ghidra, this was my first project using it and I'm in love with it!
-- And many more I can't possibly list here for reporting bugs and giving feedback! Thank you guys <3
+On NixOS, build it through the ember flake instead — it supplies the include paths
+and pins the runtime dependencies:
 
+```sh
+nix build github:axioncs/ember#core
+```
 
-## Hall of Shame aka Scammers, Leechers, etc
+## Test
 
-🚨This list exists purely for educational and entertainment purposes!
-Please do not seek out Projects listed here!
-If you decide to ignore the aforementioned warning you do so on your own risk!🚨
+```sh
+make test-stplugin
+```
 
-OnetapBeta & Hammer Decky by Hammer Steam: Resells Steamless & SLSsteam for a bogus price, completely breaking licensing agreements and leeching off the communities hard work while putting in 0 effort themself.
+Parses a set of fixtures covering the formats and failure modes seen in the wild.
+No Steam required.
 
-## Support
+## Layout
 
-Please do not treat the issue tracker like a private support hotline!
-Feel free to join our [Discord](https://discord.gg/j3ZzjeV4eQ) instead.
+| Path | What |
+|---|---|
+| `src/main.cpp` | Startup: crash guard, module discovery, hook installation |
+| `src/hooks.cpp` | Every detour, in one place |
+| `src/patterns.cpp` | Byte signatures into `steamclient.so` |
+| `src/vftableinfo.cpp` | Hookable interface methods, resolved by name |
+| `src/feats/` | Features: apps, dlc, ticket, depot keys, manifests, achievements |
+| `src/sdk/` | Steam interface and structure definitions |
+| `tools/test_stplugin.cpp` | Parser tests |
 
-## Related Projects
+## License
 
-[h3adcr-b](https://github.com/Deadboy666/h3adcr-b) & [h3adcr-b-wiki](https://github.com/Deadboy666/h3adcr-b/wiki/): Universal SLSsteam installer & steamclient downgrader
+AGPL-3.0-only. See `LICENSE`.
 
-[steamnetsock-patch](https://github.com/yesyes0649/steamnetsock-patch) & [eos-proxy](https://github.com/yesyes0649/eos-proxy): Makes FakeAppIds work in some games where it otherwise wouldn't
-
-[CloudRedirect](https://github.com/crghofficial/cloudredirect): Enables Steam Cloud, playtime & achievement sync on unowned games
-
-[SteamDB App Parser](https://greasyfork.org/en/scripts/543010-steamdb-app-parser): Vibecoded script that adds a button on SteamDB Game's pages to generate AdditionalApps & DlcData
+Upstream: [AceSLS/SLSsteam](https://github.com/AceSLS/SLSsteam). Bundled libraries:
+libmem (rdbo), protobuf (Google), yaml-cpp (jbeder), LuaJIT.

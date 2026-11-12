@@ -20,7 +20,7 @@ class CFileWatcher
 
 public:
 	constexpr static int INTERRUPT_SIG = SIGINT;
-	constexpr static int WATCH_MASK = IN_CLOSE_WRITE | IN_MOVED_TO;
+	constexpr static int WATCH_MASK = IN_CLOSE_WRITE | IN_MOVED_TO | IN_DELETE;
 
 	static void installSigHandler();
 

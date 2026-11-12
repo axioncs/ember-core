@@ -75,6 +75,10 @@ bool Apps::unlockApp(const AppId_t appId, AppOwnershipInfo_t* info)
 // plain glibc chunk, and Plat_Free/libc free accept each other's pointers).
 namespace
 {
+	// CUtlVector<T> is { T* base, i32 alloc, i32 growSize, i32 size }; the client
+	// reads exactly those offsets out of the plan it hands over.
+	static_assert(sizeof(CUtlVector<DepotInfo_t>) == 0x18, "CUtlVector must stay 0x18 bytes: steamclient owns this vector");
+
 	bool growDepotVector(CUtlVector<DepotInfo_t>* depots, const uint32_t count)
 	{
 		if (depots->mem.alloc >= count)

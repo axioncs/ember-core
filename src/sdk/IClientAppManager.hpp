@@ -48,6 +48,10 @@ SDK_Struct DepotInfo_t
 	uint8_t __pad0x1F;			//0x1F
 }; //0x20
 
+// The client's vector stride is a literal 0x20 (every walk is `shl $0x5`), so a
+// change to this struct silently misaligns the whole depot plan.
+static_assert(sizeof(DepotInfo_t) == 0x20, "DepotInfo_t must stay 0x20 bytes: steamclient walks the plan in 0x20 strides");
+
 SDK_Class IClientAppManager
 {
 public:

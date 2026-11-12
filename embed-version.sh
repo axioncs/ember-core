@@ -2,7 +2,7 @@
 
 HEADER_FILE="src/version.hpp"
 
-BRANCH="$(git branch | grep "\*" | cut -d " " -f 2)"
+BRANCH="${BUILD_BRANCH:-$(git branch 2>/dev/null | grep "\*" | cut -d " " -f 2)}"
 LAST_COMMIT_HASH="${GIT_COMMIT_HASH:-$(git rev-parse --verify HEAD)}"
 VERSION="$(cat "./res/version.txt")"
 

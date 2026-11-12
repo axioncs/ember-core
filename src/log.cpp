@@ -147,7 +147,7 @@ void CLog::__log(const LogLevelFlags_t flags, const char* file, const char* func
 
 	if (shouldNotify(flags) && notification.msg.size())
 	{
-		Utils::notify("SLSsteam", notification.msg.c_str(), notification.timeOut);
+		Utils::notify("ember", notification.msg.c_str(), notification.timeOut);
 		debug(file, function, line, "dbus-notification(\"%s\")\n", notification.msg.c_str());
 	}
 
@@ -397,7 +397,7 @@ CLog* CLog::createDefaultLog()
 	if (home)
 	{
 		std::ostringstream ss;
-		ss << home << "/.SLSsteam.log";
+		ss << home << "/.ember.log";
 
 		return new CLog(ss.str().c_str());
 	}

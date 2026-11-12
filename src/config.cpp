@@ -37,7 +37,7 @@ std::filesystem::path CConfig::getDir()
 		path << home << "/.config";
 	}
 
-	path << "/SLSsteam";
+	path << "/ember";
 
 	return path.str();
 }

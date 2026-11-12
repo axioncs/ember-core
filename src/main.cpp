@@ -139,6 +139,9 @@ static void setup()
 
 		//Arch release
 		cleanEnvVar("LD_AUDIT", "libSLSsteam.so");
+
+		//ember release
+		cleanEnvVar("LD_AUDIT", "ember-core.so");
 	}
 
 	//Do not do anything in other processes

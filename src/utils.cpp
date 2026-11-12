@@ -207,7 +207,7 @@ std::string Utils::getFileSHA256(const std::filesystem::path& path)
 
 bool Utils::notify(const char* title, const char* text, const int timeOut)
 {
-	constexpr const char *app_name = "SLSsteam";
+	constexpr const char *app_name = "ember";
 	constexpr const char *app_icon = "";
 
 	DBusError error;

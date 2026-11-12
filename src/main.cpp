@@ -273,7 +273,9 @@ static void load()
 		}
 		else
 		{
-			LOG_NOTIFY("Loaded successfully");
+			LOG_NOTIFY(
+				"ember loaded - %zu app id(s)\n",
+				g_config.addedAppIds.copy().size());
 		}
 	}
 

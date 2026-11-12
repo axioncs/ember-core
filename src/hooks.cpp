@@ -1117,7 +1117,11 @@ static bool hkClientUser_GetLegacyCDKey(IClientUser* pClientUser, AppId_t appId,
 static CSteamId hkClientUser_GetSteamId(IClientUser* pClientUser)
 {
 	const auto steamId = Hooks::IClientUser_GetSteamId->originalFn.fn(pClientUser);
-	if (!g_currentSteamId.isSet())
+
+	// The client returns the anonymous sentinel (accountId 0) until login
+	// completes. Storing it leaves isSet() false, which makes every ownership
+	// check bail — so only accept a real account id.
+	if (!g_currentSteamId.isSet() && steamId.isSet())
 	{
 		g_currentSteamId = steamId;
 		LOG_INFO("Captured SteamID (%llu) for ownership checks\n", static_cast<unsigned long long>(steamId.steamId64));

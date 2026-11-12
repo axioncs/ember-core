@@ -30,15 +30,22 @@ enum EAppState : uint32_t
 	k_EAppStateUpdatedDisabledbyapp = 0x80000
 };
 
+// Recovered from steamclient.so's own DepotInfo_t handling (the <T> entry point
+// of CUserAppManager::BuildDepotDependency at 0x1079640 in the Nov-2025 build):
+// elements are 0x20 bytes (every walk of the vector is `shl $0x5`), the client
+// compares element+0x0 against depot ids and element+0x8 against m_ulManifestID,
+// and its reset path zero-fills 0x00-0x1E, leaving 0x1F as padding.
 SDK_Struct DepotInfo_t
 {
 	AppId_t depotId;			//0x0
 	AppId_t appId;				//0x4
-	uint64_t manifestId;		//0x8
-	uint64_t size;				//0x10
-	uint8_t __pad0x18[0x4];		//0x18
-	bool lcsRequired;			//0x1C
-	uint8_t __pad0x1D[0x3];		//0x1D
+	uint64_t manifestId;		//0x8  asserted != k_uManifestIdInvalid
+	uint64_t unk0x10;			//0x10 meaning unconfirmed; the client leaves it 0
+	uint32_t unk0x18;			//0x18
+	uint8_t unk0x1C;			//0x1C
+	uint8_t unk0x1D;			//0x1D
+	uint8_t unk0x1E;			//0x1E
+	uint8_t __pad0x1F;			//0x1F
 }; //0x20
 
 SDK_Class IClientAppManager

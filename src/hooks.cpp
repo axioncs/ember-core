@@ -800,7 +800,7 @@ static bool hkUserAppManager_BuildDepotDependency
 		success
 	);
 
-	Apps::buildDepotDependency(depots, sharedDepots);
+	Apps::buildDepotDependency(appId, depots, sharedDepots);
 
 	return success;
 }

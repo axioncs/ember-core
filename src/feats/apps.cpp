@@ -5,6 +5,7 @@
 #include "../utils.hpp"
 
 #include "fakeappid.hpp"
+#include "stplugin.hpp"
 
 #include <cmath>
 #include <cstdint>
@@ -62,9 +63,116 @@ bool Apps::unlockApp(const AppId_t appId, AppOwnershipInfo_t* info)
 	return unlockApp(appId, info, g_currentSteamId);
 }
 
-void Apps::buildDepotDependency(CUtlVector<DepotInfo_t>* depots, CUtlVector<DepotInfo_t>* sharedDepots)
+// Steam hands CUserAppManager::BuildDepotDependency back an empty plan for apps
+// the account does not own, and the rewrite loop below can only edit entries
+// that already exist. These two helpers rebuild the plan from the stplug-in
+// pins instead.
+//
+// Memory ownership: the client's CUtlMemory for this vector allocates through
+// g_pMemAllocSteam and frees the buffer with the same interface when the vector
+// dies, so the replacement buffer must come from there too. tier0's Plat_* are
+// thin wrappers over exactly that interface (verified: Plat_Alloc returns a
+// plain glibc chunk, and Plat_Free/libc free accept each other's pointers).
+namespace
+{
+	bool growDepotVector(CUtlVector<DepotInfo_t>* depots, const uint32_t count)
+	{
+		if (depots->mem.alloc >= count)
+		{
+			return true;
+		}
+
+		if (!Steam::Plat_Alloc || !Steam::Plat_Realloc)
+		{
+			LOG_ERROR("Depot plan: Steam's platform allocators are unresolved, cannot grow the depot vector\n");
+			return false;
+		}
+
+		const auto bytes = static_cast<int>(sizeof(DepotInfo_t) * static_cast<size_t>(count));
+		void* mem = depots->mem.base
+			? Steam::Plat_Realloc(depots->mem.base, bytes)
+			: Steam::Plat_Alloc(bytes);
+
+		if (!mem)
+		{
+			LOG_ERROR("Depot plan: allocating %i bytes for %u depots failed\n", bytes, count);
+			return false;
+		}
+
+		// CUtlMemory keeps the allocation count next to the pointer; the size is
+		// the caller's. Nothing else may change: growSize stays whatever Steam set.
+		depots->mem.base = static_cast<DepotInfo_t*>(mem);
+		depots->mem.alloc = count;
+		return true;
+	}
+
+	// One entry per depot the app's own script pins to a manifest. Pins without a
+	// manifest id are useless here: the plan asserts a valid manifest id, and
+	// Steam would have to ask the server for one, which it denies for an unowned
+	// depot.
+	uint32_t synthesiseDepotPlan(const AppId_t appId, CUtlVector<DepotInfo_t>* depots)
+	{
+		const auto pins = StPlugin::depotPinsFor(appId);
+		if (pins.empty())
+		{
+			LOG_INFO("Depot plan: app %u has no stplug-in depot lines, plan stays empty\n", appId);
+			return 0;
+		}
+
+		size_t pinned = 0;
+		for (const auto& pin : pins)
+		{
+			pinned += pin.manifestId ? 1 : 0;
+		}
+
+		if (!pinned)
+		{
+			LOG_INFO("Depot plan: app %u has %zu depot(s) but none pinned to a manifest, plan stays empty\n", appId, pins.size());
+			return 0;
+		}
+
+		if (pinned != pins.size())
+		{
+			LOG_INFO("Depot plan: %zu of %zu depot(s) for app %u have no manifest pin and are left out\n",
+				pins.size() - pinned, pins.size(), appId);
+		}
+
+		if (!growDepotVector(depots, static_cast<uint32_t>(pinned)))
+		{
+			return 0;
+		}
+
+		uint32_t written = 0;
+		for (const auto& pin : pins)
+		{
+			if (!pin.manifestId)
+			{
+				continue;
+			}
+
+			// Same shape the client itself builds: depot, app, manifest, rest zero.
+			DepotInfo_t& entry = depots->mem.base[written];
+			memset(&entry, 0, sizeof(entry));
+			entry.depotId = pin.depotId;
+			entry.appId = appId;
+			entry.manifestId = pin.manifestId;
+			++written;
+		}
+
+		depots->size = written;
+		LOG_INFO("Depot plan: synthesised %u depot(s) for unowned app %u\n", written, appId);
+		return written;
+	}
+}
+
+void Apps::buildDepotDependency(const AppId_t appId, CUtlVector<DepotInfo_t>* depots, CUtlVector<DepotInfo_t>* sharedDepots)
 {
 	LOG_DEBUG("Vec Alloc %u, Grow %u, Size %u\n", depots->mem.alloc, depots->mem.growSize, depots->size);
+
+	if (depots->size == 0 && g_config.isAddedAppId(appId))
+	{
+		synthesiseDepotPlan(appId, depots);
+	}
 
 	const auto depotBlacklist = g_config.depotBlacklist.get();
 	const auto manifestOverrides = g_config.manifestIds.get();

@@ -89,14 +89,43 @@ namespace
 		return !name.empty();
 	}
 
-	void applyCall(const std::string& name, const std::vector<std::string>& args, StPlugin::Import_t& out)
+	std::string lowered(const std::string& name)
 	{
-		std::string lowered = name;
-		std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char c) {
+		auto out = name;
+		std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) {
 			return static_cast<char>(std::tolower(c));
 		});
+		return out;
+	}
 
-		if (lowered == "addappid")
+	// The app a script unlocks is its own frame of reference: a depot line is a
+	// depot of that app. Depot == app happens (the MAIN APPLICATION key line) and
+	// is not a depot, so it is dropped here.
+	StPlugin::DepotPin_t* recordDepot(StPlugin::Import_t& out, const AppId_t appScope, const AppId_t depotId)
+	{
+		if (!appScope || !depotId || depotId == appScope)
+		{
+			return nullptr;
+		}
+
+		auto& pins = out.depotsByApp[appScope];
+		for (auto& pin : pins)
+		{
+			if (pin.depotId == depotId)
+			{
+				return &pin;
+			}
+		}
+
+		pins.push_back({ depotId, 0, 0 });
+		return &pins.back();
+	}
+
+	void applyCall(const std::string& name, const std::vector<std::string>& args, StPlugin::Import_t& out, const AppId_t appScope)
+	{
+		const auto call = lowered(name);
+
+		if (call == "addappid")
 		{
 			if (args.size() == 1 && allDigits(args[0]))
 			{
@@ -105,18 +134,32 @@ namespace
 			}
 			if (args.size() == 3 && allDigits(args[0]) && isDepotKey(args[2]))
 			{
-				out.depotKeys[static_cast<AppId_t>(std::stoul(args[0]))] = args[2];
+				const auto depot = static_cast<AppId_t>(std::stoul(args[0]));
+				out.depotKeys[depot] = args[2];
+				recordDepot(out, appScope, depot);
 			}
 			return;
 		}
 
-		if (lowered == "setmanifestid")
+		if (call == "setmanifestid")
 		{
 			// Two-argument form, plus a three-argument form carrying the
 			// manifest size that some archives emit.
 			if ((args.size() == 2 || args.size() == 3) && allDigits(args[0]) && allDigits(args[1]))
 			{
-				out.manifestIds[static_cast<AppId_t>(std::stoul(args[0]))] = std::stoull(args[1]);
+				const auto depot = static_cast<AppId_t>(std::stoul(args[0]));
+				const uint64_t gid = std::stoull(args[1]);
+
+				out.manifestIds[depot] = gid;
+
+				if (auto* pin = recordDepot(out, appScope, depot))
+				{
+					pin->manifestId = gid;
+					if (args.size() == 3 && allDigits(args[2]))
+					{
+						pin->size = std::stoull(args[2]);
+					}
+				}
 			}
 		}
 	}
@@ -130,24 +173,48 @@ namespace
 			return;
 		}
 
-		// The script is named after the app it unlocks. Some generators emit the
-		// app id only inside a depot-key line, which is filed as a key, so the
-		// filename is the authoritative source for the app id itself.
-		const auto stem = path.stem().string();
-		if (allDigits(stem))
-		{
-			out.appIds.insert(static_cast<AppId_t>(std::stoul(stem)));
-		}
-
+		std::vector<std::string> lines;
 		std::string raw;
 		while (std::getline(file, raw))
 		{
-			const std::string line = stripComment(raw);
-			if (line.empty())
+			auto line = stripComment(raw);
+			if (!line.empty())
 			{
-				continue;
+				lines.push_back(std::move(line));
 			}
+		}
 
+		// The script is named after the app it unlocks. Some generators emit the
+		// app id only inside a depot-key line, which is filed as a key, so the
+		// filename is the authoritative source for the app id itself; a bare
+		// addappid is only the fallback for non-numeric names.
+		AppId_t appScope = 0;
+		const auto stem = path.stem().string();
+		if (allDigits(stem))
+		{
+			appScope = static_cast<AppId_t>(std::stoul(stem));
+		}
+		else
+		{
+			for (const auto& line : lines)
+			{
+				std::string name;
+				std::vector<std::string> args;
+				if (parseCall(line, name, args) && lowered(name) == "addappid" && args.size() == 1 && allDigits(args[0]))
+				{
+					appScope = static_cast<AppId_t>(std::stoul(args[0]));
+					break;
+				}
+			}
+		}
+
+		if (appScope)
+		{
+			out.appIds.insert(appScope);
+		}
+
+		for (const auto& line : lines)
+		{
 			std::string name;
 			std::vector<std::string> args;
 			if (!parseCall(line, name, args))
@@ -157,7 +224,7 @@ namespace
 
 			try
 			{
-				applyCall(name, args, out);
+				applyCall(name, args, out, appScope);
 			}
 			catch (const std::exception& e)
 			{
@@ -247,14 +314,28 @@ void StPlugin::mergeInto(Import_t const& import)
 	}
 	g_config.manifestIds = manifests;
 
+	size_t pinnedDepots = 0;
+	for (const auto& [appId, pins] : import.depotsByApp)
+	{
+		for (const auto& pin : pins)
+		{
+			if (pin.manifestId)
+			{
+				++pinnedDepots;
+			}
+		}
+	}
+
 	LOG_INFO(
-		"stplug-in: %u file(s), %zu app id(s) (+%zu), %zu depot key(s), %zu manifest pin(s) (+%zu)\n",
+		"stplug-in: %u file(s), %zu app id(s) (+%zu), %zu depot key(s), %zu manifest pin(s) (+%zu), %zu depot(s) planned over %zu app(s)\n",
 		import.files,
 		import.appIds.size(),
 		ids.size() - before,
 		import.depotKeys.size(),
 		import.manifestIds.size(),
-		manifests.size() - manifestBefore);
+		manifests.size() - manifestBefore,
+		pinnedDepots,
+		import.depotsByApp.size());
 }
 
 const std::string* StPlugin::depotKeyFor(AppId_t depot)
@@ -262,4 +343,15 @@ const std::string* StPlugin::depotKeyFor(AppId_t depot)
 	std::lock_guard<std::mutex> lock(g_mutex);
 	const auto it = g_current.depotKeys.find(depot);
 	return it == g_current.depotKeys.end() ? nullptr : &it->second;
+}
+
+std::vector<StPlugin::DepotPin_t> StPlugin::depotPinsFor(const AppId_t appId)
+{
+	std::lock_guard<std::mutex> lock(g_mutex);
+	const auto it = g_current.depotsByApp.find(appId);
+	if (it == g_current.depotsByApp.end())
+	{
+		return {};
+	}
+	return it->second;
 }

@@ -39,8 +39,16 @@ bool Patterns::init()
 	{
 		if (!pattern->find())
 		{
+			// This is the line that tells you a client update moved a signature.
+			// It has to be INFO: DEBUG is compiled out of release builds.
+			LOG_INFO("Pattern not found: %s\n", pattern->name.c_str());
 			found = false;
 		}
+	}
+
+	if (found)
+	{
+		LOG_INFO("Patterns: all %zu signature(s) resolved\n", patterns.size());
 	}
 
 	return found;

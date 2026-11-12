@@ -9,6 +9,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -76,8 +77,13 @@ bool Apps::unlockApp(const AppId_t appId, AppOwnershipInfo_t* info)
 namespace
 {
 	// CUtlVector<T> is { T* base, i32 alloc, i32 growSize, i32 size }; the client
-	// reads exactly those offsets out of the plan it hands over.
-	static_assert(sizeof(CUtlVector<DepotInfo_t>) == 0x18, "CUtlVector must stay 0x18 bytes: steamclient owns this vector");
+	// reads exactly those offsets out of the plan it hands over. ember's SDK types
+	// are packed, so the struct is 0x14 here while the client's is 0x18 — the
+	// member offsets are the contract, not the total size.
+	static_assert(offsetof(CUtlVector<DepotInfo_t>, mem) == 0x0);
+	static_assert(offsetof(CUtlMemory<DepotInfo_t>, alloc) == 0x8);
+	static_assert(offsetof(CUtlMemory<DepotInfo_t>, growSize) == 0xC);
+	static_assert(offsetof(CUtlVector<DepotInfo_t>, size) == 0x10);
 
 	bool growDepotVector(CUtlVector<DepotInfo_t>* depots, const uint32_t count)
 	{

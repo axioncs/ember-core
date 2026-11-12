@@ -13,7 +13,7 @@
 
 #pragma once
 
-#include "sdk/sdk.hpp"
+#include "../sdk/sdk.hpp"
 
 #include <cstdint>
 #include <filesystem>

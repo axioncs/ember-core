@@ -198,16 +198,27 @@ void Ticket::launchApp(const GameId_t gameId)
 	LOG_DEBUG("Force loaded AppOwnershipTicket for %lu\n", gameId);
 }
 
-void Ticket::recvAppTicket(const CNetPacket* pkt)
+void Ticket::recvAppTicket(CNetPacket* pkt)
 {
-	const auto msg = pkt->deserializeBody<CMsgClientGetAppOwnershipTicketResponse>();
+	auto msg = pkt->deserializeBody<CMsgClientGetAppOwnershipTicketResponse>();
 	if (msg.eresult() == k_EResultOK)
 	{
 		saveTicketToCache(msg.app_id(), msg.ticket(), g_currentSteamId, ETicketType::AppOwnershipTicket);
 		return;
 	}
 
-	//We do not load tickets from disk in the network layer, otherwise they won't be loaded in offline mode
+	// The CM denies ownership tickets for apps that are only unlocked locally,
+	// and the downloader treats that as a hard fault. Stamp the result; the
+	// ticket bytes are left untouched.
+	if (!g_config.isAddedAppId(msg.app_id()))
+	{
+		return;
+	}
+
+	msg.set_eresult(k_EResultOK);
+	pkt->serialize(msg);
+
+	LOG_INFO("Ticket: stamped eresult=OK for app %u\n", msg.app_id());
 }
 
 void Ticket::recvEncryptedAppTicket(CNetPacket* pkt)

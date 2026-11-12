@@ -81,7 +81,7 @@ public:
 	void getTicketOwnershipExtendedData(const AppId_t appId);
 
 	//Netpacket stuff
-	void recvAppTicket(const CNetPacket* pkt);
+	void recvAppTicket(CNetPacket* pkt);
 	void recvEncryptedAppTicket(CNetPacket* pkt);
 
 	void recvMsg(CNetPacket* pkt);

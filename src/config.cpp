@@ -98,6 +98,11 @@ bool CConfig::init()
 	//TODO: Move to static init
 	if (watcher->addFile(getPath().c_str()) != -1)
 	{
+		// Dropping a script into stplug-in should not need a Steam restart.
+		for (const auto& dir : StPlugin::scriptDirs())
+		{
+			watcher->addFile(dir);
+		}
 		watcher->start();
 	}
 	else

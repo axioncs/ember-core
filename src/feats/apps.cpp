@@ -502,23 +502,36 @@ namespace
 		// whole install as "no connection". The client purges depotcache
 		// entries when an update is cancelled, so this runs per attempt rather
 		// than once at load.
-		uint32_t staged = 0;
+		uint32_t copied = 0;
 		uint32_t missing = 0;
 		{
 			std::string missingList;
 			for (const auto& depot : keep)
 			{
-				if (ManifestStore::stage(depot.depotId, depot.manifestId))
+				switch (ManifestStore::stage(depot.depotId, depot.manifestId))
 				{
-					++staged;
-					continue;
+				case ManifestStore::StageResult::Present:
+					break;
+				case ManifestStore::StageResult::Copied:
+					++copied;
+					break;
+				case ManifestStore::StageResult::Missing:
+					++missing;
+					missingList += (missingList.empty() ? "" : ",") + std::to_string(depot.depotId);
+					break;
 				}
-
-				++missing;
-				missingList += (missingList.empty() ? "" : ",") + std::to_string(depot.depotId);
 			}
 
-			if (missing)
+			// One line per event, not per call: the plan is rebuilt on every
+			// reconfigure, so an unconditional log would repeat dozens of times
+			// per click and the evidence would be unreadable.
+			if (copied)
+			{
+				LOG_INFO("Depot plan: app %u staged %u of %zu manifest(s) into depotcache%s%s\n",
+					appId, copied, keep.size(), missing ? "; no manifest for depot(s) " : "",
+					missing ? missingList.c_str() : "");
+			}
+			else if (missing)
 			{
 				static std::mutex missingMutex;
 				static std::unordered_map<AppId_t, std::string> loggedMissing;
@@ -527,8 +540,7 @@ namespace
 				if (loggedMissing[appId] != missingList)
 				{
 					loggedMissing[appId] = missingList;
-					LOG_INFO("Depot plan: app %u staged %u of %zu manifest(s); no manifest in the store for depot(s) %s\n",
-						appId, staged, keep.size(), missingList.c_str());
+					LOG_INFO("Depot plan: app %u: no manifest in the store for depot(s) %s\n", appId, missingList.c_str());
 				}
 			}
 		}

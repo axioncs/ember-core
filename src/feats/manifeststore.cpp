@@ -138,13 +138,13 @@ void ManifestStore::publish()
 	}
 }
 
-bool ManifestStore::stage(unsigned int depotId, unsigned long long manifestId)
+ManifestStore::StageResult ManifestStore::stage(unsigned int depotId, unsigned long long manifestId)
 {
 	std::error_code ec;
 	const auto cache = depotCacheDir();
 	if (cache.empty() || !std::filesystem::is_directory(cache, ec))
 	{
-		return false;
+		return StageResult::Missing;
 	}
 
 	const auto name = std::to_string(depotId) + "_" + std::to_string(manifestId) + ".manifest";
@@ -154,19 +154,19 @@ bool ManifestStore::stage(unsigned int depotId, unsigned long long manifestId)
 	const auto size = std::filesystem::file_size(src, ec);
 	if (ec || size == 0)
 	{
-		return false;
+		return StageResult::Missing;
 	}
 
 	if (std::filesystem::exists(dest, ec) && std::filesystem::file_size(dest, ec) == size)
 	{
-		return true;
+		return StageResult::Present;
 	}
 
 	if (!looksLikeManifest(src))
 	{
-		return false;
+		return StageResult::Missing;
 	}
 
 	std::filesystem::copy_file(src, dest, std::filesystem::copy_options::overwrite_existing, ec);
-	return !ec;
+	return ec ? StageResult::Missing : StageResult::Copied;
 }

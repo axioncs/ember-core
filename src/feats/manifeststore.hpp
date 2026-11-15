@@ -10,7 +10,13 @@ namespace ManifestStore
 
 	// Stage one depot's pinned manifest. The client purges depotcache entries
 	// for apps whose update was cancelled, so the plan hook has to restage on
-	// every attempt, not just at load. Returns true when the entry is in
-	// depotcache afterwards.
-	bool stage(unsigned int depotId, unsigned long long manifestId);
+	// every attempt, not just at load.
+	enum class StageResult
+	{
+		Present, // already in depotcache
+		Copied,	 // written just now
+		Missing, // the store has no manifest for this depot and gid
+	};
+
+	StageResult stage(unsigned int depotId, unsigned long long manifestId);
 }

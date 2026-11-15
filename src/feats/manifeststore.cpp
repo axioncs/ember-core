@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <filesystem>
+#include <string>
 #include <system_error>
 
 namespace
@@ -135,4 +136,37 @@ void ManifestStore::publish()
 	{
 		LOG_INFO("ManifestStore: published %u manifest(s) to depotcache\n", published);
 	}
+}
+
+bool ManifestStore::stage(unsigned int depotId, unsigned long long manifestId)
+{
+	std::error_code ec;
+	const auto cache = depotCacheDir();
+	if (cache.empty() || !std::filesystem::is_directory(cache, ec))
+	{
+		return false;
+	}
+
+	const auto name = std::to_string(depotId) + "_" + std::to_string(manifestId) + ".manifest";
+	const auto dest = cache / name;
+	const auto src = CConfig::getDir() / "manifests" / name;
+
+	const auto size = std::filesystem::file_size(src, ec);
+	if (ec || size == 0)
+	{
+		return false;
+	}
+
+	if (std::filesystem::exists(dest, ec) && std::filesystem::file_size(dest, ec) == size)
+	{
+		return true;
+	}
+
+	if (!looksLikeManifest(src))
+	{
+		return false;
+	}
+
+	std::filesystem::copy_file(src, dest, std::filesystem::copy_options::overwrite_existing, ec);
+	return !ec;
 }

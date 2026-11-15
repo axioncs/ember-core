@@ -5,6 +5,7 @@
 #include "../utils.hpp"
 
 #include "fakeappid.hpp"
+#include "manifeststore.hpp"
 #include "stplugin.hpp"
 
 #include <algorithm>
@@ -19,6 +20,7 @@
 #include <mutex>
 #include <sstream>
 #include <unordered_map>
+#include <unordered_set>
 #include <string>
 
 
@@ -492,6 +494,43 @@ namespace
 		{
 			LOG_INFO("Depot plan: app %u: nothing left after language filtering, plan stays empty\n", appId);
 			return 0;
+		}
+
+		// Stage every planned manifest before the client asks for one. A depot
+		// with no manifest in depotcache makes the client request it from the
+		// CM, which refuses an unowned app, and one refused depot aborts the
+		// whole install as "no connection". The client purges depotcache
+		// entries when an update is cancelled, so this runs per attempt rather
+		// than once at load.
+		uint32_t staged = 0;
+		uint32_t missing = 0;
+		{
+			std::string missingList;
+			for (const auto& depot : keep)
+			{
+				if (ManifestStore::stage(depot.depotId, depot.manifestId))
+				{
+					++staged;
+					continue;
+				}
+
+				++missing;
+				missingList += (missingList.empty() ? "" : ",") + std::to_string(depot.depotId);
+			}
+
+			if (missing)
+			{
+				static std::mutex missingMutex;
+				static std::unordered_map<AppId_t, std::string> loggedMissing;
+				const std::lock_guard lock(missingMutex);
+
+				if (loggedMissing[appId] != missingList)
+				{
+					loggedMissing[appId] = missingList;
+					LOG_INFO("Depot plan: app %u staged %u of %zu manifest(s); no manifest in the store for depot(s) %s\n",
+						appId, staged, keep.size(), missingList.c_str());
+				}
+			}
 		}
 
 		if (!growDepotVector(depots, static_cast<uint32_t>(keep.size())))

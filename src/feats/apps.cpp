@@ -496,12 +496,8 @@ namespace
 			return 0;
 		}
 
-		// Stage every planned manifest before the client asks for one. A depot
-		// with no manifest in depotcache makes the client request it from the
-		// CM, which refuses an unowned app, and one refused depot aborts the
-		// whole install as "no connection". The client purges depotcache
-		// entries when an update is cancelled, so this runs per attempt rather
-		// than once at load.
+		// Restage per attempt: the client purges depotcache when an update is
+		// cancelled, and a depot with no local manifest is refused from the CM.
 		uint32_t copied = 0;
 		uint32_t missing = 0;
 		{
@@ -522,9 +518,6 @@ namespace
 				}
 			}
 
-			// One line per event, not per call: the plan is rebuilt on every
-			// reconfigure, so an unconditional log would repeat dozens of times
-			// per click and the evidence would be unreadable.
 			if (copied)
 			{
 				LOG_INFO("Depot plan: app %u staged %u of %zu manifest(s) into depotcache%s%s\n",

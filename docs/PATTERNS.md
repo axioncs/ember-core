@@ -114,9 +114,14 @@ plan needs an install to show a real size.
 
 ## When upstream moves
 
+ember's `ember` branch descends from upstream's `dev-multiarch`: every upstream
+commit is an ancestor, and ember's own work sits on top. `git merge` is therefore
+the right operation, and a clean merge is the normal outcome.
+
 The `upstream` workflow in this repository runs daily. It fetches
-`AceSLS/SLSsteam@dev-multiarch` and either opens a pull request (clean merge) or an
-issue (conflict). A new upstream commit usually means a new Steam client, so:
+`AceSLS/SLSsteam@dev-multiarch` and either opens a pull request (clean merge) or
+updates a single standing issue (conflict). A new upstream commit usually means a
+new Steam client, so:
 
 1. Read the PR/issue and look for new pattern values upstream already derived.
 2. Merge, then run the build and `rg 'Pattern not found'`.
@@ -125,6 +130,20 @@ issue (conflict). A new upstream commit usually means a new Steam client, so:
 
 Do not force a conflicting merge. `src/feats/apps.cpp` and `src/hooks.cpp` carry a
 lot of ember-specific code; resolve those by hand.
+
+If the workflow ever reports `refusing to merge unrelated histories`, the branch
+has been re-imported rather than rebased — the two histories share no commit.
+That is not a conflict to resolve in the merge; rebase ember's own commits onto
+`upstream/dev-multiarch` instead:
+
+```sh
+git rebase --onto upstream/dev-multiarch <last-upstream-commit-in-ember> ember
+```
+
+The last upstream commit in ember is the newest ancestor that also exists upstream
+(`git log --oneline ember ^upstream/dev-multiarch` lists everything above it).
+Afterwards `git rev-list --count ember..upstream/dev-multiarch` is 0, and the
+workflow's clean-merge path works again.
 
 ## Inventory
 

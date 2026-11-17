@@ -4,6 +4,11 @@ name: upstream
 # when the byte signatures in src/patterns.cpp have to be re-derived. This does
 # not merge blindly: it opens a pull request when the merge is clean and an issue
 # when it is not, because most of src/feats/apps.cpp and src/hooks.cpp is ours.
+#
+# ember's history descends from upstream's (see docs/PATTERNS.md), so merge is
+# the right operation here and "unrelated histories" means the branch was
+# re-imported by hand. That is a human problem, not a merge conflict, and must
+# never be reported as one.
 
 on:
   schedule:
@@ -14,6 +19,12 @@ permissions:
   contents: write
   pull-requests: write
   issues: write
+
+# One sync at a time, and a superseded run is cancelled rather than racing the
+# next one for the same branch.
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: true
 
 jobs:
   sync:
@@ -31,12 +42,27 @@ jobs:
           git fetch --no-tags upstream dev-multiarch
           behind=$(git rev-list --count HEAD..upstream/dev-multiarch)
           echo "behind=$behind" >> "$GITHUB_OUTPUT"
-          git log --oneline HEAD..upstream/dev-multiarch > upstream.txt
           echo "commits: $behind"
+
+          if [ "$behind" != "0" ]; then
+            git log --oneline HEAD..upstream/dev-multiarch > upstream.txt
+            # No merge base means the branch is not descended from upstream at
+            # all; merging would refuse. Surface it as a hard error.
+            if ! git merge-base HEAD upstream/dev-multiarch >/dev/null 2>&1; then
+              echo "unrelated=1" >> "$GITHUB_OUTPUT"
+              echo "::error::ember shares no history with upstream/dev-multiarch"
+            fi
+          fi
+
+      # A stale sync branch from an abandoned attempt would otherwise make
+      # create-pull-request fail on every later sync.
+      - name: Reset the sync branch
+        if: steps.probe.outputs.behind != '0' && steps.probe.outputs.unrelated != '1'
+        run: git push origin --delete upstream-sync || true
 
       - name: Attempt the merge on a branch
         id: merge
-        if: steps.probe.outputs.behind != '0'
+        if: steps.probe.outputs.behind != '0' && steps.probe.outputs.unrelated != '1'
         run: |
           git config user.name  "ember upstream bot"
           git config user.email "bot@users.noreply.github.com"
@@ -44,7 +70,10 @@ jobs:
           if git merge --no-edit upstream/dev-multiarch; then
             echo "clean=1" >> "$GITHUB_OUTPUT"
           else
-            git merge --abort || true
+            git diff --name-only --diff-filter=U > conflicts.txt
+            echo "conflicts:"
+            cat conflicts.txt
+            git merge --abort
             echo "clean=0" >> "$GITHUB_OUTPUT"
           fi
 
@@ -58,25 +87,86 @@ jobs:
           body-path: upstream.txt
           labels: upstream
 
+      # One open issue, updated in place. Filing a new one every night the merge
+      # conflicted buried the first report under its own duplicates.
       - name: Issue when it conflicts
         if: steps.merge.outputs.clean == '0'
         uses: actions/github-script@v7
         with:
           script: |
+            const fs = require('fs');
+            const read = (p) => { try { return fs.readFileSync(p, 'utf8').trim(); } catch { return ''; } };
+
             const body = [
               "`AceSLS/SLSsteam@dev-multiarch` has new commits that do not merge cleanly into `ember`.",
               "",
               "This usually means a new Steam client, so the signatures in `src/patterns.cpp`",
-              "probably need re-deriving as well. Rebase manually; do not force the merge.",
+              "probably need re-derived as well. Rebase manually; do not force the merge.",
               "",
+              "Conflicts:",
               "```",
-              require('fs').readFileSync('upstream.txt', 'utf8').slice(0, 3000),
+              read('conflicts.txt') || "(git reported none)",
+              "```",
+              "",
+              "Upstream commits:",
+              "```",
+              read('upstream.txt').slice(0, 3000),
               "```",
             ].join("\n");
-            await github.rest.issues.create({
+
+            const open = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: "upstream moved and the merge conflicts",
-              body,
-              labels: ["upstream"],
+              state: 'open',
+              labels: 'upstream',
+              per_page: 20,
             });
+
+            const existing = open.data.find(i => i.title === 'upstream moved and the merge conflicts');
+
+            if (existing) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body,
+              });
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body: `Still conflicting as of ${new Date().toISOString().slice(0, 10)}.`,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: 'upstream moved and the merge conflicts',
+                body,
+                labels: ['upstream'],
+              });
+            }
+
+      # Once the merge goes through, the standing sync issue is stale.
+      - name: Close the sync issue when the merge is clean
+        if: steps.merge.outputs.clean == '1'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const open = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'upstream',
+              per_page: 20,
+            });
+
+            for (const issue of open.data) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                state: 'closed',
+                state_reason: 'completed',
+              });
+            }

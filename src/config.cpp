@@ -92,7 +92,7 @@ bool CConfig::createFile() const
 
 namespace
 {
-	constexpr int32_t kConfigVersion = 1;
+	constexpr int32_t kConfigVersion = 2;
 
 	// Splits the embedded template into top-level blocks: each is the run of
 	// comment/blank lines that introduce a key, the key line, and its indented
@@ -313,8 +313,9 @@ bool CConfig::loadSettings(const bool firstLoad, const bool silent)
 	fakeEmail = getSetting<std::string>(rootNode, "FakeEmail", "");
 	fakeWalletBalance = getSetting<int32_t>(rootNode, "FakeWalletBalance", 0);
 	plugins = getSetting<bool>(rootNode, "Plugins", false);
-	disableCloud = getSetting<bool>(rootNode, "DisableCloud", true);
+	disableCloud = getSetting<bool>(rootNode, "DisableCloud", false);
 	disableUpdates = getSetting<bool>(rootNode, "DisableUpdates", true);
+	cloud = getSetting<bool>(rootNode, "Cloud", true);
 	dumpInterfaceMaps = getSetting<bool>(rootNode, "DumpClientInterfaces", false);
 	extendedLogging = getSetting<bool>(rootNode, "ExtendedLogging", false);
 

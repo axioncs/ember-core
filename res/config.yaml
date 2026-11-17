@@ -125,8 +125,15 @@ API: no
 #SLSsteam plugins can run arbitrary code! So only run plugins you trust
 Plugins: no
 
-#Disable cloud saves for unlocked games. Set to "no" if using CloudRedirect or similar.
-DisableCloud: yes
+#Disable cloud saves for unlocked games. ember answers Steam's cloud RPCs itself
+#when Cloud is enabled below, so leaving this on would keep saves away from it.
+DisableCloud: no
+
+#Serve Steam Cloud save files from ~/.config/ember/cloud instead of the account's
+#Steam Cloud. Added apps then keep their saves across machines through whatever
+#the CLI syncs that directory to. Owned games are unaffected: their RPCs still
+#reach Steam.
+Cloud: yes
 
 #Disable updates for AppIds on AdditionalApps
 #Only works for unowned games, since those do not get any depots from CUserAppManager::BuildDepotDependency.
@@ -165,4 +172,4 @@ DumpClientInterfaces: no
 ExtendedLogging: no
 
 #Schema version of this file. Older files get the missing keys appended on load.
-ConfigVersion: 1
+ConfigVersion: 2

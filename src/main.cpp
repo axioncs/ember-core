@@ -2,6 +2,7 @@
 
 #include "api.hpp"
 #include "config.hpp"
+#include "feats/cloud.hpp"
 #include "decompiler.hpp"
 #include "filewatcher.hpp"
 #include "globals.hpp"
@@ -104,6 +105,8 @@ static std::string getReleaseType()
 //__attribute__((noreturn))
 static void unload()
 {
+	Cloud::shutdown();
+
 	//Hooks::remove();
 
 	//This is absolutely unnessecary for applications loading SLSsteam where it cancels from setup()
@@ -277,6 +280,11 @@ static void load()
 		std::error_code ec;
 		std::filesystem::remove(bootMarker, ec);
 	}
+
+	// After the hooks, because the server's port has to be known before the
+	// first cloud RPC arrives. Failure is not fatal: Steam's own cloud behaviour
+	// is the fallback, and the log says which one is in play.
+	Cloud::init();
 
 	Lua::init(true);
 	SLSAPI::init();

@@ -2,7 +2,7 @@
 
 #include "cloudhttp.hpp"
 
-#include "log.hpp"
+#include "../log.hpp"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>

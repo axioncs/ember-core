@@ -2,6 +2,7 @@
 
 #include "feats/achievements.hpp"
 #include "feats/apps.hpp"
+#include "feats/cloud.hpp"
 #include "feats/depotkey.hpp"
 #include "feats/dlc.hpp"
 #include "feats/misc.hpp"
@@ -300,6 +301,8 @@ static uint32_t hkAppDataCache_BParseResponseFromMessage(void* pAppDataCache, CP
 	return ret;
 }
 
+static bool tryAnswerCloud(const char* name, void* send, void* recv, uint32_t& outResult);
+
 static uint32_t hkClientUnifiedServiceTransport_SendAndRecvMsg(CClientUnifiedServiceTransport* pUnifiedServiceTransport, const char* name, void* send, void* recv, void* arg4)
 {
 	uint32_t ret = Achievements::sendAndRecvGetPlayerStats
@@ -312,6 +315,30 @@ static uint32_t hkClientUnifiedServiceTransport_SendAndRecvMsg(CClientUnifiedSer
 
 	if (!ret)
 	{
+		uint32_t cloudResult = 0;
+
+		// Before the original: an added app's cloud call would otherwise reach
+		// Valve and come back Access Denied. The return value is the eresult,
+		// so it is passed straight through.
+		if (tryAnswerCloud(name, send, recv, cloudResult))
+		{
+			ret = cloudResult;
+
+			// INFO, not DEBUG: this line is how a test tells "ember answered the
+			// cloud call" from "Steam did", and DEBUG is compiled out of release.
+			LOG_INFO
+			(
+				"%s(%p, %s, answered by ember) -> %u\n",
+
+				Hooks::CClientUnifiedServiceMethod_SendAndRecvMsg->name.c_str(),
+				reinterpret_cast<void*>(pUnifiedServiceTransport),
+				name,
+				ret
+			);
+
+			return ret;
+		}
+
 		LOG_TRACE("Calling tramp\n");
 		ret = Hooks::CClientUnifiedServiceMethod_SendAndRecvMsg->tramp.fn(pUnifiedServiceTransport, name, send, recv, arg4);
 	}
@@ -332,6 +359,18 @@ static uint32_t hkClientUnifiedServiceTransport_SendAndRecvMsg(CClientUnifiedSer
 	);
 
 	return ret;
+}
+
+// Steam sends every Cloud.* RPC through the transport's SendAndRecv. For an
+// added app the real server refuses it, so it is answered here instead.
+static bool tryAnswerCloud(const char* name, void* send, void* recv, uint32_t& outResult)
+{
+	if (!name || !Cloud::isHandled(name))
+	{
+		return false;
+	}
+
+	return Cloud::handleMessage(name, send, recv, outResult);
 }
 
 static void hkCMInterface_RecvPkt(CCMInterface* pCMInterface, CNetPacket* pNetPacket)

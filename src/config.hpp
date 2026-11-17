@@ -80,6 +80,7 @@ public:
 	MTVariable<bool> plugins;
 	MTVariable<bool> disableCloud;
 	MTVariable<bool> disableUpdates;
+	MTVariable<bool> cloud;
 	MTVariable<std::string> fakeName;
 	MTVariable<std::string> fakeEmail;
 	MTVariable<int32_t> fakeWalletBalance;

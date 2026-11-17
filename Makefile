@@ -178,13 +178,24 @@ test-cloud:
 test-cloudrpc:
 	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -Werror \
 		tools/test_cloudrpc.cpp src/feats/cloudrpc.cpp src/feats/cloudstore.cpp \
-		src/feats/cloudpb.cpp src/feats/sha256.cpp -o /tmp/test_cloudrpc
+		src/feats/cloudpb.cpp src/feats/cloudendpoint.cpp src/feats/sha256.cpp \
+		-o /tmp/test_cloudrpc
 	/tmp/test_cloudrpc
+
+# Host test for the loopback blob server. Real sockets, so a wiring mistake
+# shows up here rather than inside the client.
+test-cloudhttp:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -Werror -Isrc \
+		tools/test_cloudhttp.cpp tools/test_logstub.cpp src/feats/cloudhttp.cpp \
+		src/feats/cloudstore.cpp src/feats/cloudpb.cpp src/feats/cloudendpoint.cpp \
+		src/feats/sha256.cpp -o /tmp/test_cloudhttp
+	/tmp/test_cloudhttp
 
 .PHONY: \
 	test-stplugin \
 	test-cloud \
 	test-cloudrpc \
+	test-cloudhttp \
 	audit-libs \
 	tools \
 	schema-grabber \

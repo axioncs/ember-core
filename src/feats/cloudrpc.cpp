@@ -146,7 +146,7 @@ namespace CloudRPC
 	}
 
 	Result clientFileDownload(const std::filesystem::path& root, const uint32_t accountId,
-		const uint32_t port, const std::vector<CloudPB::Field>& request)
+		const Ember::CloudEndpoint& endpoint, const std::vector<CloudPB::Field>& request)
 	{
 		Result result;
 		result.handled = true;
@@ -184,9 +184,8 @@ namespace CloudRPC
 			return result;
 		}
 
-		const auto host = "127.0.0.1:" + std::to_string(port);
-		const auto path = "/ember/cloud/" + std::to_string(accountId) + "/" + std::to_string(appId)
-			+ "/" + urlEncode(it->path, true);
+		const auto host = endpoint.host();
+		const auto path = endpoint.urlPath(accountId, appId, urlEncode(it->path, true));
 
 		body.writeVarint(2, clampSize(it->size));
 		body.writeVarint(3, clampSize(it->size));
@@ -247,7 +246,7 @@ namespace CloudRPC
 	}
 
 	Result clientBeginFileUpload(const std::filesystem::path& root, const uint32_t accountId,
-		const uint32_t port, const std::vector<CloudPB::Field>& request)
+		const Ember::CloudEndpoint& endpoint, const std::vector<CloudPB::Field>& request)
 	{
 		Result result;
 		result.handled = true;
@@ -271,9 +270,8 @@ namespace CloudRPC
 			return result;
 		}
 
-		const auto host = "127.0.0.1:" + std::to_string(port);
-		const auto path = "/ember/cloud/" + std::to_string(accountId) + "/" + std::to_string(appId)
-			+ "/" + urlEncode(requested, true);
+		const auto host = endpoint.host();
+		const auto path = endpoint.urlPath(accountId, appId, urlEncode(requested, true));
 
 		(void)root;
 
@@ -382,7 +380,8 @@ namespace CloudRPC
 	}
 
 	Result dispatch(const std::string& method, const std::filesystem::path& root,
-		const uint32_t accountId, const uint32_t port, const uint8_t* request, const size_t requestLen)
+		const uint32_t accountId, const Ember::CloudEndpoint& endpoint,
+		const uint8_t* request, const size_t requestLen)
 	{
 		const std::string raw(reinterpret_cast<const char*>(request), requestLen);
 		const auto fields = CloudPB::parse(raw);
@@ -393,7 +392,7 @@ namespace CloudRPC
 		}
 		if (method == kRPCFileDownload)
 		{
-			return clientFileDownload(root, accountId, port, fields);
+			return clientFileDownload(root, accountId, endpoint, fields);
 		}
 		if (method == kRPCBeginBatch)
 		{
@@ -405,7 +404,7 @@ namespace CloudRPC
 		}
 		if (method == kRPCBeginUpload)
 		{
-			return clientBeginFileUpload(root, accountId, port, fields);
+			return clientBeginFileUpload(root, accountId, endpoint, fields);
 		}
 		if (method == kRPCCommitUpload)
 		{

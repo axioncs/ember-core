@@ -50,11 +50,20 @@ namespace
 	constexpr uint32_t kAccount = 76561198u;
 	constexpr uint32_t kApp = 1091500u;
 
+	// A fixed endpoint keeps the assertions readable; the real one is random.
+	Ember::CloudEndpoint endpoint()
+	{
+		Ember::CloudEndpoint e;
+		e.port = 45678;
+		e.token = "0123456789abcdef0123456789abcdef";
+		return e;
+	}
+
 	// Runs one request through dispatch and hands back the parsed response.
 	CloudRPC::Result call(const std::string& method, const std::filesystem::path& root,
 		const uint32_t account, const CloudPB::Writer& request)
 	{
-		return CloudRPC::dispatch(method, root, account, 45678, request.bytes(), request.size());
+		return CloudRPC::dispatch(method, root, account, endpoint(), request.bytes(), request.size());
 	}
 }
 
@@ -155,7 +164,7 @@ static void testDownloadKnownFile()
 	// The URL points at our loopback server, not at Steam.
 	const auto host = CloudPB::string(fields, 7);
 	CHECK(host == "127.0.0.1:45678");
-	CHECK(CloudPB::string(fields, 8) == "/ember/cloud/76561198/1091500/save.dat");
+	CHECK(CloudPB::string(fields, 8) == "/ember/cloud/76561198/1091500/0123456789abcdef0123456789abcdef/save.dat");
 	CHECK(CloudPB::varint(fields, 9) == 0);		// use_https
 	CHECK(CloudPB::varint(fields, 2) == 11);	// file_size
 	CHECK(CloudPB::varint(fields, 3) == 11);	// raw_file_size
@@ -245,7 +254,7 @@ static void testBatchRoundTrip()
 
 		const auto inner = CloudPB::parse(block->bytes);
 		CHECK(CloudPB::string(inner, 1) == "127.0.0.1:45678");
-		CHECK(CloudPB::string(inner, 2) == "/ember/cloud/76561198/1091500/save.dat");
+		CHECK(CloudPB::string(inner, 2) == "/ember/cloud/76561198/1091500/0123456789abcdef0123456789abcdef/save.dat");
 		CHECK(CloudPB::varint(inner, 4) == 4);	// PUT
 		CHECK(CloudPB::varint(inner, 6) == 0);	// block_offset
 		CHECK(CloudPB::varint(inner, 7) == 5);	// block_length
@@ -352,7 +361,7 @@ static void testUnhandledFallsThrough()
 	request.writeVarint(1, 1);
 
 	const auto result = CloudRPC::dispatch("Cloud.GetClientEncryptionKey#1", scratch.root, kAccount,
-		45678, request.bytes(), request.size());
+		endpoint(), request.bytes(), request.size());
 
 	CHECK(!result.handled);
 }

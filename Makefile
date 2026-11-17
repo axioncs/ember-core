@@ -167,8 +167,24 @@ test-stplugin:
 		tools/test_stplugin.cpp src/feats/stplugin_parse.cpp -o /tmp/test_stplugin
 	/tmp/test_stplugin
 
+# Host test for the cloud store layer (hash, protobuf codec, on-disk store).
+test-cloud:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -Werror \
+		tools/test_cloud.cpp src/feats/cloudstore.cpp src/feats/cloudpb.cpp \
+		src/feats/sha256.cpp -o /tmp/test_cloud
+	/tmp/test_cloud
+
+# Host test for the Cloud.* RPC handlers.
+test-cloudrpc:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -Werror \
+		tools/test_cloudrpc.cpp src/feats/cloudrpc.cpp src/feats/cloudstore.cpp \
+		src/feats/cloudpb.cpp src/feats/sha256.cpp -o /tmp/test_cloudrpc
+	/tmp/test_cloudrpc
+
 .PHONY: \
 	test-stplugin \
+	test-cloud \
+	test-cloudrpc \
 	audit-libs \
 	tools \
 	schema-grabber \

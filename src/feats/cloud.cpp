@@ -112,10 +112,13 @@ namespace Cloud
 			return false;
 		}
 
-		// Owned apps keep Steam's cloud: their saves belong to the account, and
-		// answering for them would fork a paying customer's save data.
-		if (g_pSteamEngine && g_pSteamEngine->getUser(0)->isSubscribed(appId))
+		// "Added" means ember injected the app, and those are exactly the ones
+		// whose cloud Steam will not serve. Do NOT test isSubscribed() here:
+		// ember's ownership hook answers true for added apps, so that test is
+		// true for every app this layer is meant to serve.
+		if (!g_config.isAddedAppId(appId))
 		{
+			LOG_INFO("Cloud: %u is not an added app, leaving it to Steam\n", appId);
 			return false;
 		}
 
@@ -123,6 +126,7 @@ namespace Cloud
 		// saves under <root>/0/<appid>, which no account owns.
 		if (!g_currentSteamId.isSet() || g_currentSteamId.accountId() == 0)
 		{
+			LOG_INFO("Cloud: %u arrives before login, leaving it to Steam\n", appId);
 			return false;
 		}
 

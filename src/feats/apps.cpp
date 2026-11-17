@@ -1006,6 +1006,14 @@ bool Apps::shouldDisableCloud(const AppId_t appId)
 		return false;
 	}
 
+	// ember serves cloud for the apps it added, so the ownership proxy below is
+	// the wrong question for them: isSubscribed() is false by design for an added
+	// app, and that would switch off exactly the saves this is meant to keep.
+	if (g_config.isAddedAppId(appId))
+	{
+		return false;
+	}
+
 	return !g_pSteamEngine->getUser(0)->isSubscribed(appId);
 }
 

@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <unordered_set>
 #include <pthread.h>
 #include <strings.h>
 #include <unistd.h>
@@ -1068,19 +1069,38 @@ static bool hkClientRemoteStorage_IsCloudEnabledForApp(void* pClientRemoteStorag
 {
 	LOG_TRACE("Calling tramp\n");
 	const bool enabled = Hooks::IClientRemoteStorage_IsCloudEnabledForApp->tramp.fn(pClientRemoteStorage, appId);
-	LOG_ONCE
-	(
-		"%s(%p, %u) -> %i\n",
 
-		Hooks::IClientRemoteStorage_IsCloudEnabledForApp->name.c_str(),
-		pClientRemoteStorage,
-		appId,
-		enabled
-	);
+	// INFO, not LOG_ONCE: LOG_ONCE is compiled out of release, and this is the
+	// only evidence of whether the hook is being called at all. Without it a
+	// still-disabled client looks identical to a hook that never ran.
+	{
+		static std::mutex logMutex;
+		static std::unordered_set<AppId_t> logged;
+
+		std::lock_guard<std::mutex> lock(logMutex);
+
+		if (logged.insert(appId).second)
+		{
+			LOG_INFO
+			(
+				"%s(%p, %u) -> %i\n",
+
+				Hooks::IClientRemoteStorage_IsCloudEnabledForApp->name.c_str(),
+				pClientRemoteStorage,
+				appId,
+				enabled
+			);
+		}
+	}
 
 	if (Apps::shouldDisableCloud(appId))
 	{
-		LOG_ONCE("Disabled cloud for %u\n", appId);
+		static std::unordered_set<AppId_t> disabledLogged;
+		if (disabledLogged.insert(appId).second)
+		{
+			LOG_INFO("Disabled cloud for %u\n", appId);
+		}
+
 		return false;
 	}
 

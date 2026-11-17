@@ -137,13 +137,28 @@ That is not a conflict to resolve in the merge; rebase ember's own commits onto
 `upstream/dev-multiarch` instead:
 
 ```sh
-git rebase --onto upstream/dev-multiarch <last-upstream-commit-in-ember> ember
+# The newest commit ember shares with upstream — the fork point.
+base=$(git merge-base ember upstream/dev-multiarch)
+git rebase --onto upstream/dev-multiarch "$base" ember
 ```
 
-The last upstream commit in ember is the newest ancestor that also exists upstream
-(`git log --oneline ember ^upstream/dev-multiarch` lists everything above it).
+If `git merge-base` returns nothing, the histories are genuinely unrelated and
+the fork point must be identified by subject match instead:
+
+```sh
+# Upstream's copy of ember's fork-point commit, by identical subject line.
+git log --format='%s' ember | tail -n +1 > /tmp/subjects
+git log --format='%h %s' upstream/dev-multiarch | grep -Fxf /tmp/subjects | tail -1
+```
+
 Afterwards `git rev-list --count ember..upstream/dev-multiarch` is 0, and the
-workflow's clean-merge path works again.
+workflow's clean-merge path works again. Force-push the branch (`--force-with-lease`)
+and re-point any tag that sat on the old history — `v0.1.0` was on a pre-rebase
+commit and had to be moved to its rebased equivalent.
+
+ember's history is **related** to upstream: 1196 of its commits are upstream's,
+replayed with new SHAs. A `git log --format=%s` overlap of ~1189 with upstream is
+the signature of that, and it means patch-id comparison is the right tool, not SHA.
 
 ## Inventory
 

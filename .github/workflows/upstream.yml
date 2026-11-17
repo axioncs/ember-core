@@ -44,15 +44,22 @@ jobs:
           echo "behind=$behind" >> "$GITHUB_OUTPUT"
           echo "commits: $behind"
 
-          if [ "$behind" != "0" ]; then
-            git log --oneline HEAD..upstream/dev-multiarch > upstream.txt
-            # No merge base means the branch is not descended from upstream at
-            # all; merging would refuse. Surface it as a hard error.
-            if ! git merge-base HEAD upstream/dev-multiarch >/dev/null 2>&1; then
-              echo "unrelated=1" >> "$GITHUB_OUTPUT"
-              echo "::error::ember shares no history with upstream/dev-multiarch; rebase onto it (see docs/PATTERNS.md)"
-              exit 1
-            fi
+          if [ "$behind" = "0" ]; then
+            # Nothing to sync. Close a standing sync issue left over from an
+            # earlier failure rather than opening a new one.
+            echo "nothing to do"
+            exit 0
+          fi
+
+          git log --oneline HEAD..upstream/dev-multiarch > upstream.txt
+
+          # No merge base means the branch is not descended from upstream at
+          # all. That is a re-import, not a conflict: merging would refuse, and
+          # the fix is a rebase, not conflict resolution.
+          if ! git merge-base HEAD upstream/dev-multiarch >/dev/null 2>&1; then
+            echo "unrelated=1" >> "$GITHUB_OUTPUT"
+            echo "::error::ember shares no history with upstream/dev-multiarch; rebase onto it (see docs/PATTERNS.md)"
+            exit 1
           fi
 
       # A stale sync branch from an abandoned attempt would otherwise make
@@ -105,7 +112,7 @@ jobs:
               "`AceSLS/SLSsteam@dev-multiarch` has new commits that do not merge cleanly into `ember`.",
               "",
               "This usually means a new Steam client, so the signatures in `src/patterns.cpp`",
-              "probably need re-derived as well. Rebase manually; do not force the merge.",
+              "probably need re-derived as well. Resolve the conflicts and merge; do not force.",
               "",
               "Conflicts:",
               "```",
@@ -151,9 +158,9 @@ jobs:
               });
             }
 
-      # Once there is nothing left to report, the standing sync issue is stale.
-      # Closes on "no drift" as well as "clean merge", otherwise an issue left
-      # open by an old failure would never be closed if upstream then went quiet.
+      # Once the merge lands, the standing sync issue is stale. Close on "no
+      # drift" as well, otherwise an issue left open by an old failure would
+      # stay open forever if upstream then went quiet.
       - name: Close the sync issue when there is nothing to report
         if: >-
           steps.probe.outputs.behind == '0' ||

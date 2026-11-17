@@ -50,7 +50,8 @@ jobs:
             # all; merging would refuse. Surface it as a hard error.
             if ! git merge-base HEAD upstream/dev-multiarch >/dev/null 2>&1; then
               echo "unrelated=1" >> "$GITHUB_OUTPUT"
-              echo "::error::ember shares no history with upstream/dev-multiarch"
+              echo "::error::ember shares no history with upstream/dev-multiarch; rebase onto it (see docs/PATTERNS.md)"
+              exit 1
             fi
           fi
 
@@ -77,8 +78,11 @@ jobs:
             echo "clean=0" >> "$GITHUB_OUTPUT"
           fi
 
+      # Guard on the step outcome, not just the output: GitHub compares an empty
+      # output and '0' as equal (both coerce to 0), so a bare `== '0'` also
+      # matched when the merge step was skipped entirely.
       - name: Pull request when the merge is clean
-        if: steps.merge.outputs.clean == '1'
+        if: steps.merge.outcome == 'success' && steps.merge.outputs.clean == '1'
         uses: peter-evans/create-pull-request@v6
         with:
           branch: upstream-sync
@@ -90,7 +94,7 @@ jobs:
       # One open issue, updated in place. Filing a new one every night the merge
       # conflicted buried the first report under its own duplicates.
       - name: Issue when it conflicts
-        if: steps.merge.outputs.clean == '0'
+        if: steps.merge.outcome == 'success' && steps.merge.outputs.clean == '0'
         uses: actions/github-script@v7
         with:
           script: |
@@ -147,9 +151,13 @@ jobs:
               });
             }
 
-      # Once the merge goes through, the standing sync issue is stale.
-      - name: Close the sync issue when the merge is clean
-        if: steps.merge.outputs.clean == '1'
+      # Once there is nothing left to report, the standing sync issue is stale.
+      # Closes on "no drift" as well as "clean merge", otherwise an issue left
+      # open by an old failure would never be closed if upstream then went quiet.
+      - name: Close the sync issue when there is nothing to report
+        if: >-
+          steps.probe.outputs.behind == '0' ||
+          (steps.merge.outcome == 'success' && steps.merge.outputs.clean == '1')
         uses: actions/github-script@v7
         with:
           script: |

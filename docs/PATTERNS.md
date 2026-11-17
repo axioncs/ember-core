@@ -118,6 +118,12 @@ ember's `ember` branch descends from upstream's `dev-multiarch`: every upstream
 commit is an ancestor, and ember's own work sits on top. `git merge` is therefore
 the right operation, and a clean merge is the normal outcome.
 
+A rebase is only needed if the branch was re-imported by hand, which shows up as
+`fatal: refusing to merge unrelated histories` and as a non-zero merge-base
+check. If `git merge-base ember upstream/dev-multiarch` prints a commit, no rebase
+is needed — verify with `git rev-list --count ember..upstream/dev-multiarch` (0
+means up to date) rather than assuming.
+
 The `upstream` workflow in this repository runs daily. It fetches
 `AceSLS/SLSsteam@dev-multiarch` and either opens a pull request (clean merge) or
 updates a single standing issue (conflict). A new upstream commit usually means a

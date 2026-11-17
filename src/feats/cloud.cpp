@@ -140,6 +140,9 @@ namespace Cloud
 			return false;
 		}
 
+		const auto fields = CloudPB::parse(request);
+		const auto appId = CloudRPC::extractAppId(method, fields);
+
 		const auto endpoint = g_server->endpoint();
 
 		const auto result = CloudRPC::dispatch
@@ -160,7 +163,11 @@ namespace Cloud
 		out.assign(reinterpret_cast<const char*>(result.body.data()), result.body.size());
 		eresult = result.eresult;
 
-		LOG_INFO("Cloud: %s answered here (%zu bytes, eresult %u)\n", method, out.size(), eresult);
+		// The app id is in this line because "some app was answered" cannot be
+		// attributed to a title afterwards, and every question about cloud saves
+		// starts with "which game".
+		LOG_INFO("Cloud: %s app=%u answered here (%zu bytes, eresult %u)\n",
+			method, appId, out.size(), eresult);
 		return true;
 	}
 

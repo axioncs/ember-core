@@ -1084,6 +1084,24 @@ static bool hkClientRemoteStorage_IsCloudEnabledForApp(void* pClientRemoteStorag
 		return false;
 	}
 
+	// An added app has no PICS cloud entry, so the client answers "no" and never
+	// asks for a changelist. Answering here is what makes the RPC layer reachable
+	// at all: without it ember's cloud work is dead code for exactly the apps it
+	// is for. Steam's own cloud toggle is a separate switch, above this one.
+	if (enabled == false && g_config.isAddedAppId(appId) && Cloud::isEnabled())
+	{
+		// LOG_ONCE is behind #ifdef DEBUG and vanishes from release builds, so the
+		// first override would leave no trace at all.
+		static bool logged = false;
+		if (!logged)
+		{
+			logged = true;
+			LOG_INFO("Cloud enabled for added app %u\n", appId);
+		}
+
+		return true;
+	}
+
 	return enabled;
 }
 

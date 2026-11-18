@@ -1,15 +1,35 @@
 #include "curl.hpp"
-
+#include "cainfo.hpp"
 #include "log.hpp"
-#include "utils.hpp"
-
-#include <dlfcn.h>
-#include <thread>
-#include <vector>
 
 #include <curl/curl.h>
 #include <curl/easy.h>
+#include <dlfcn.h>
 
+typedef CURL* (*curl_easy_init_t)();
+typedef CURLcode (*curl_easy_setopt_t)(CURL *curl, CURLoption option, ...);
+typedef CURLcode (*curl_easy_perform_t)(CURL *curl);
+typedef void (*curl_easy_cleanup_t)(CURL *curl);
+
+static curl_easy_init_t p_curl_easy_init = nullptr;
+static curl_easy_setopt_t p_curl_easy_setopt = nullptr;
+static curl_easy_perform_t p_curl_easy_perform = nullptr;
+static curl_easy_cleanup_t p_curl_easy_cleanup = nullptr;
+
+static bool load_curl() {
+	if (p_curl_easy_init) return true;
+
+	void* handle = dlopen("libcurl.so.4", RTLD_NOLOAD | RTLD_LAZY);
+	if (!handle) handle = dlopen("libcurl.so.4", RTLD_LAZY);
+	if (!handle) handle = RTLD_DEFAULT;
+
+	p_curl_easy_init = (curl_easy_init_t)dlsym(handle, "curl_easy_init");
+	p_curl_easy_setopt = (curl_easy_setopt_t)dlsym(handle, "curl_easy_setopt");
+	p_curl_easy_perform = (curl_easy_perform_t)dlsym(handle, "curl_easy_perform");
+	p_curl_easy_cleanup = (curl_easy_cleanup_t)dlsym(handle, "curl_easy_cleanup");
+
+	return p_curl_easy_init && p_curl_easy_setopt && p_curl_easy_perform && p_curl_easy_cleanup;
+}
 
 static size_t writeCallback(const char* content, size_t size, size_t memberSize, std::string* data)
 {
@@ -17,61 +37,27 @@ static size_t writeCallback(const char* content, size_t size, size_t memberSize,
 	return size * memberSize;
 }
 
-static void actualDownloadString(Curl::Request_t* req)
+int Curl::getString(const char* url, std::string& out)
 {
-	CURL* curl = curl_easy_init();
-	if (!curl)
-	{
-		LOG_CUSTOM(k_ELogLevelError | k_ELogLevelOnce, "Failed to initialize curl!\n");
-		req->result = CURLE_FAILED_INIT;
-		return;
-	}
+	if (!load_curl()) return -1;
 
-	curl_easy_setopt(curl, CURLOPT_URL, req->url);
-	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
-	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &req->out);
-	curl_easy_setopt(curl, CURLOPT_TIMEOUT, req->timeOut);
+	CURL* curl = p_curl_easy_init();
+	if (!curl) return -1;
 
-	for (const auto& hdr : req->headers)
-	{
-		curl_easy_setopt(curl, CURLOPT_HEADER, hdr.c_str());
-	}
+	p_curl_easy_setopt(curl, CURLOPT_URL, url);
+	p_curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
+	p_curl_easy_setopt(curl, CURLOPT_WRITEDATA, &out);
 
-	req->result = curl_easy_perform(curl);
+	if (const char* f = ca::bundleFile()) p_curl_easy_setopt(curl, CURLOPT_CAINFO, f);
+	if (const char* d = ca::bundleDir())  p_curl_easy_setopt(curl, CURLOPT_CAPATH, d);
 
-	curl_easy_cleanup(curl);
-}
+	p_curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+	p_curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+	p_curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
 
-int Curl::downloadString(const char* url, std::string& out, const int timeOut, const bool async)
-{
-	return downloadString(url, { }, out, timeOut, async);
-}
+	auto res = p_curl_easy_perform(curl);
 
-int Curl::downloadString(const char* url, const std::vector<std::string>& headers, std::string& out, const int timeOut, const bool async)
-{
-	LOG_DEBUG("Curling %s\n", url);
+	p_curl_easy_cleanup(curl);
 
-	int result = 0;
-	Request_t req { url, headers, out, timeOut, result };
-
-	if (async && Utils::isGLIBCBugged())
-	{
-		//This might be considered a warcrime. But it's necessary on glibc < 2.43
-		//because of a bug with TLS that causes a null pointer dereference
-		try
-		{
-			auto t = std::thread(actualDownloadString, &req);
-			t.join();
-		}
-		catch (...)
-		{
-			LOG_ERROR("Failed to run async curl for %s!\n", url);
-		}
-	}
-	else
-	{
-		actualDownloadString(&req);
-	}
-
-	return result;
+	return res;
 }

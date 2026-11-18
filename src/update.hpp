@@ -7,16 +7,16 @@
 #include <string>
 #include <unordered_set>
 
-
 namespace Updater
 {
 	extern std::map<uint64_t, std::unordered_set<std::string>> clientHashMap;
 
 	std::string getCacheFilePath();
 	std::string loadFromCache();
-	void saveToCache(const std::string yaml);
+	void saveToCache(std::string yaml);
 
 	bool init();
 	bool verifySafeModeHash();
-	bool isEnabled();
+
+	void refreshInBackgroundIfStale();
 }

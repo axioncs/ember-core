@@ -1,43 +1,55 @@
 #pragma once
 
-#include "../sdk/sdk.hpp"
-
+#include <cstddef>
 #include <cstdint>
-#include <mutex>
-#include <unordered_set>
+#include <map>
+#include <vector>
 
+class CAppOwnershipInfo;
+class CNetPacket;
+class CSteamId;
 
 namespace Apps
 {
 	extern bool applistRequested;
-	extern std::unordered_set<AppId_t> privateApps;
+	extern std::map<uint32_t, int> appIdOwnerOverride;
 
-	extern std::mutex pendingLicenseChangesMutex;
-	extern std::unordered_set<AppId_t> pendingLicenseChanges;
+	inline bool genericOwnershipOverrideAllowed(
+		bool playNotOwnedGames, bool ownsLicense, bool appTypeKnown,
+		bool isDlc, bool automaticFilter, bool isGameOrApplication)
+	{
+		if (!playNotOwnedGames || ownsLicense || !appTypeKnown || isDlc)
+		{
+			return false;
+		}
+		return !automaticFilter || isGameOrApplication;
+	}
 
-	bool unlockApp(const AppId_t appId, AppOwnershipInfo_t* info, const CSteamId& ownerId);
-	bool unlockApp(const AppId_t appId, AppOwnershipInfo_t* info);
+	inline bool ownershipOverrideAllowed(
+		bool managedApp, bool playNotOwnedGames, bool ownsLicense,
+		bool appTypeKnown, bool isDlc, bool automaticFilter,
+		bool isGameOrApplication)
+	{
+		return managedApp || genericOwnershipOverrideAllowed(
+			playNotOwnedGames, ownsLicense, appTypeKnown, isDlc,
+			automaticFilter, isGameOrApplication);
+	}
 
-	// Returns the number of depots it synthesised, 0 when it left the plan alone.
-	uint32_t buildDepotDependency(const AppId_t appId, CUtlVector<DepotInfo_t>* depots, CUtlVector<DepotInfo_t>* sharedDepots);
-	bool checkAppOwnership(const AppId_t appId, AppOwnershipInfo_t* info);
-	void getAppStateInfo(const AppId_t appId, AppStateInfo_t* info);
-	void getLegacyCDKey(const AppId_t appId);
-	void getSubscribedApps(AppId_t* appList, const uint32_t size, uint32_t& count);
-	void parseProductInfoFromResponse(CMsgClientPICSProductInfoResponse* msg);
-	void runIPCFrame();
-	void spawnGame(const GameId_t* gameId, std::string& cmd, std::string& cmdline);
+	bool unlockApp(uint32_t appId, CAppOwnershipInfo* info, const CSteamId& ownerId);
+	bool unlockApp(uint32_t appId, CAppOwnershipInfo* info);
 
-	void postAppLicensesChanged(const std::unordered_set<AppId_t>& apps);
+	bool checkAppOwnership(uint32_t appId, CAppOwnershipInfo* info);
+	void getSubscribedApps(uint32_t* appList, size_t size, uint32_t& count);
 
-	bool shouldDisableCloud(const AppId_t appId);
-	bool shouldDisableCDKey(const AppId_t appId);
-	bool shouldDisableUpdates(const AppId_t appId);
+	void setDiscoveredAppDlcIds(const std::vector<uint32_t>& dlcIds);
+	void setConfiguredAppDlcIds(const std::vector<uint32_t>& dlcIds);
+	bool isAddedAppDlcId(uint32_t appId);
 
-	void sendAndRecvLastPlayedTimes(const char* name, CPlayer_GetLastPlayedTimes_Response* recv);
-	void sendGamesPlayed(CNetPacket* pkt);
-	void sendPICSInfoRequest(CNetPacket* pkt);
-	void sendMsg(CNetPacket* pkt);
+	bool shouldDisableCloud(uint32_t appId);
+	bool shouldDisableCDKey(uint32_t appId);
+	bool shouldDisableUpdates(uint32_t appId);
 
-	void setConfigStoreString(const char* key, const char* value);
+	void sendGamesPlayed(CNetPacket* packet);
+	void sendPICSInfoRequest(CNetPacket* packet);
+	void sendMsg(CNetPacket* packet);
 };

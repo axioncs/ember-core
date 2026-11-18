@@ -1,43 +1,31 @@
 #include "CNetPacket.hpp"
 
+#include <limits>
 
-std::string CNetPacket::getProtoBufTypeName() const
+bool CNetPacket::deserializeHeader(CMsgProtoBufHeader& header) const
 {
-	auto name = std::string("Unknown");
+	header.Clear();
+	if (!isValid())
+		return false;
 
-	if (!isProtoBuf())
-	{
-		return name;
-	}
+	CNetPacketBody* b = body();
+	const uint32_t available = sizeBytes() - sizeof(CNetPacketBody);
+	if (b->headerSize > available
+	    || b->headerSize > static_cast<uint32_t>(std::numeric_limits<int>::max()))
+		return false;
 
-	const EMsg type = getProtoBufType();
-	if (!EMsg_IsValid(type))
-	{
-		return name;
-	}
-
-	return EMsg_Name(type);
-}
-
-CMsgProtoBufHeader CNetPacket::deserializeHeader() const
-{
-	const uintptr_t headerOffset = sizeof(CNetPacketBody);
-	uint8_t* mem = reinterpret_cast<uint8_t*>(body) + headerOffset;
-
-	CMsgProtoBufHeader header;
-	if (!header.ParseFromArray(mem, body->headerSize))
-	{
-		LOG_ERROR("Failed to parse header!\n");
-	}
-
-	return header;
+	const auto* memory =
+		reinterpret_cast<const uint8_t*>(b) + sizeof(CNetPacketBody);
+	return header.ParseFromArray(memory, static_cast<int>(b->headerSize));
 }
 
 void CNetPacket::free()
 {
-	Steam::Plat_Free(body);
+	CNetPacketBody* b = body();
+	if (b)
+		Steam::Plat_Free(b);
 
-	size = 0;
-	body = nullptr;
-	originalBody = nullptr;
+	setSize(0);
+	setBody(nullptr);
+	setOriginalBody(nullptr);
 }

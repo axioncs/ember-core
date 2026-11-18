@@ -1,280 +1,199 @@
 #pragma once
 
-#include "sdk/sdk.hpp"
-
-#include "lua.hpp"
+#include "sdk/steam.hpp"
 
 #include "libmem/libmem.h"
 
 #include <cstddef>
 #include <memory>
 #include <string>
-#include <unordered_map>
-#include <unordered_set>
 
+class CAppOwnershipInfo;
+class CProtoBufMsgBase;
+class CUtlBuffer;
+
+struct gameserverdetails_t;
+struct GamePlayed_t;
 
 struct Pattern_t;
-struct VFTableInfo_t;
+
+struct CNetPacket;
+struct CRemoteClientPacket;
+enum EWebSocketOpCode : uint32_t;
 
 template<typename T>
-struct FunctionUnion_t
+union FunctionUnion_t
 {
-	union
-	{
-		T fn;
-		lm_address_t address;
-	};
-
-	FunctionUnion_t();
-	FunctionUnion_t(const lm_address_t address);
-	FunctionUnion_t(const T fn);
+	T fn;
+	lm_address_t address;
 };
 
-class IHook
+template<typename T>
+class Hook
 {
 public:
-	static std::unordered_set<IHook*> hooks;
+	std::string name;
+	FunctionUnion_t<T> originalFn;
+	FunctionUnion_t<T> hookFn;
 
-	enum class EType
-	{
-		Unknown,
-		Detour,
-		VFT,
-		Lua
-	};
-	
-	IHook();
-	virtual ~IHook();
-
-	virtual EType getType() = 0;
-	virtual bool isHooked() = 0;
-	virtual void setup() = 0;
+	Hook(const char* name);
 
 	virtual void place() = 0;
 	virtual void remove() = 0;
 };
 
 template<typename T>
-class Hook : public IHook
-{
-	lm_address_t targetAddress = LM_ADDRESS_BAD;
-	lm_address_t* targetAddressPtr = nullptr;
-
-protected:
-	bool setupRan = false;
-
-public:
-	std::string name = "";
-	FunctionUnion_t<T> originalFn = nullptr;
-	FunctionUnion_t<T> hookFn = nullptr;
-
-	Hook(const std::string& name, lm_address_t targetAddress, const T hookFn);
-	//VFTIndex_t & Pattern_t hooks
-	Hook(const std::string& name, lm_address_t* targetAddressPtr, const T hookFn);
-
-	constexpr virtual IHook::EType getType()
-	{
-		return IHook::EType::Unknown;
-	}
-
-	constexpr virtual bool isHooked()
-	{
-		return false;
-	}
-
-	virtual void setup();
-};
-
-template<typename T>
 class DetourHook : public Hook<T>
 {
 public:
-	FunctionUnion_t<T> tramp = nullptr;
-	size_t size = 0;
+	FunctionUnion_t<T> tramp;
+	size_t size;
 
-	DetourHook(const std::string& name, lm_address_t targetAddress, const T hookFn);
-	DetourHook(Pattern_t& targetPattern, const T hookFn);
-	DetourHook(VFTableInfo_t& targetVFTInfo, const T hookFn);
-
-	constexpr virtual IHook::EType getType()
-	{
-		return IHook::EType::Detour;
-	}
-
-	constexpr virtual bool isHooked()
-	{
-		return size > 0;
-	}
+	DetourHook(const char* name);
+	DetourHook();
 
 	virtual void place();
 	virtual void remove();
+
+	bool setup(Pattern_t pattern, T hookFn);
 };
 
 template<typename T>
 class VFTHook : public Hook<T>
 {
-	std::shared_ptr<lm_vmt_t> vft = nullptr;
-
 public:
-	unsigned int index = 0;
-	bool hooked = false;
+	std::shared_ptr<lm_vmt_t> vft;
+	unsigned int index;
+	bool hooked;
 
-	VFTHook(const std::shared_ptr<lm_vmt_t>& vft, const VFTableInfo_t& mapVFTInfo, const T hookFn);
-
-	constexpr virtual IHook::EType getType()
-	{
-		return IHook::EType::Detour;
-	}
-
-	constexpr virtual bool isHooked()
-	{
-		return hooked;
-	}
+	VFTHook(const char* name);
 
 	virtual void place();
 	virtual void remove();
-};
 
-// Lua hooks are a little special for now
-class LuaHook
-{
-	static int hookCount;
-public:
-	static std::unordered_map<int, LuaHook*> hooks;
-
-	std::string name = "";
-	lm_address_t fn = LM_ADDRESS_BAD;
-	lm_address_t hookFn = LM_ADDRESS_BAD;
-	lm_address_t tramp = 0;
-	size_t size = 0;
-	int idx = -1;
-
-	LuaHook(const char* name, const Lua::Ptr_t targetFn);
-	~LuaHook();
-
-	Lua::Ptr_t place();
-	bool remove();
+	void setup(std::shared_ptr<lm_vmt_t> vft, unsigned int index, T hookFn);
 };
 
 namespace Hooks
 {
 	typedef void(*TraceIPC_t)(const char*, const char*);
 
-	typedef uint32_t(*CAPIJob_SendAndRecv_t)(CAPIJob*, CProtoBufMsgBase*, uint32_t, uint32_t, CProtoBufMsgBase*, EMsg);
+	typedef void(*IClientAppManager_RunIPCFrame_t)(void*, void*, void*, void*);
+	typedef void(*IClientApps_RunIPCFrame_t)(void*, void*, void*, void*);
+	typedef void(*IClientRemoteStorage_RunIPCFrame_t)(void*, void*, void*, void*);
+	typedef void(*IClientUGC_RunIPCFrame_t)(void*, void*, void*, void*);
+	typedef void(*IClientUtils_RunIPCFrame_t)(void*, void*, void*, void*);
+	typedef void(*IClientUser_RunIPCFrame_t)(void*, void*, void*, void*);
+	typedef void(*IClientUserStats_RunIPCFrame_t)(void*, void*, void*, void*);
 
-	typedef uint32_t(*CAppDataCache_BParseResponseFromMessage_t)(void*, CProtoBufMsgBase*);
+	typedef uint32_t(*CAPIJob_GetPlayerStats_t)(void*);
 
-	typedef uint32_t(*CClientUnifiedServiceMethod_SendAndRecvMsg_t)(CClientUnifiedServiceTransport*, const char*, void*, void*, void*);
+	typedef void(*CProtoBufMsgBase_InitFromPacket_t)(CProtoBufMsgBase*, void*);
+	typedef void(*CCMInterface_RecvPkt_t)(void*, CNetPacket*);
+	typedef uint32_t(*CProtoBufMsgBase_Send_t)(CProtoBufMsgBase*);
 
-	typedef void(*CCMInterface_RecvPkt_t)(CCMInterface*, CNetPacket*);
+	typedef void(*CSteamEngine_Init_t)(void*);
+	typedef uint32_t(*CSteamEngine_ProcessIPCFrame_t)(void*, HSteamPipe, CUtlBuffer*, CUtlBuffer*);
+	typedef uint32_t(*CSteamEngine_SetAppIdForCurrentPipe_t)(void*, uint32_t, bool);
 
-	typedef uint32_t(*CSteamEngine_ProcessIPCFrame_t)(CSteamEngine*, HSteamPipe, CUtlBuffer*, CUtlBuffer*);
-	typedef AppId_t(*CSteamEngine_SetAppIdForCurrentPipe_t)(CSteamEngine*, AppId_t, bool);
+	typedef gameserverdetails_t*(*CSteamMatchmakingServers_GetServerDetails_t)(void*, uint32_t, uint32_t);
+	typedef uint32_t(*CSteamMatchmakingServers_RequestInternetServerList_t)(void*, uint32_t, uint32_t, uint32_t, uint32_t);
 
-	typedef gameserverdetails_t*(*CSteamMatchmakingServers_GetServerDetails_t)(void*, HServerRequest, uint32_t);
-	typedef HServerRequest(*CSteamMatchmakingServers_RequestInternetServerList_t)(void*, AppId_t, void*, uint32_t, void*);
-
-	typedef bool(*CUDPConnection_BAsyncSend_t)(CUDPConnection*, void*, steamsize_t, bool);
-
-	typedef bool(*CUser_BIsSubscribedApp_t)(CUser*, AppId_t);
-	typedef bool(*CUser_CheckAppOwnership_t)(CUser*, AppId_t, AppOwnershipInfo_t*);
-	typedef uint32_t(*CUser_GetSubscribedApps_t)(CUser*, AppId_t*, uint32_t, uint8_t);
-	typedef uint32_t(*CUser_PostCallbackToAppId_t)(CUser*, AppId_t, ECallbackType, void*, steamsize_t);
-	typedef uint32_t(*CUser_SpawnGameId_t)(void*, const char*, const char*, const char*, GameId_t*, const char*, int32_t, int32_t, int32_t, int32_t, void*);
-
-	typedef bool(*CUserAppManager_BuildDepotDependency_t)(IClientAppManager*, AppId_t, void*, CUtlVector<DepotInfo_t>*, CUtlVector<DepotInfo_t>*, void*, uint32_t*, bool*);
-
-	typedef bool(*CWebSocketConnection_BBuildAndAsyncSendFrame_t)(CWebSocketConnection*, EWebSocketConnectionSendType, void*, steamsize_t);
-
-	typedef bool(*IClientConfigStore_SetString_t)(void*, uint32_t, const char*, const char*);
-
+	typedef uint32_t(*CUser_CheckAppOwnership_t)(void*, uint32_t, CAppOwnershipInfo*);
+	typedef uint32_t(*CUser_GetSubscribedApps_t)(void*, uint32_t*, uint32_t, uint8_t);
+	typedef uint32_t(*CUser_PostCallbackToAppId_t)(void*, uint32_t, uint32_t, void*, uint32_t);
 	typedef uint32_t(*IClientFriends_GetFriendGamePlayed_t)(void*, uint64_t, GamePlayed_t*);
+	typedef bool(*IClientAppManager_BCanRemotePlayTogether_t)(void*, uint32_t);
 
-	typedef bool(*IClientRemoteStorage_IsCloudEnabledForApp_t)(void*, AppId_t);
+	typedef bool(*IClientUser_BLoggedOn_t)(void*);
+	typedef uint32_t(*IClientUser_BUpdateAppOwnershipTicket_t)(void*, uint32_t, bool);
+	typedef uint32_t(*IClientUser_GetAppOwnershipTicketExtendedData_t)(void*, uint32_t, void*, uint32_t, uint32_t*, uint32_t*, uint32_t*, uint32_t*);
+	typedef bool(*IClientUser_GetEncryptedAppTicket_t)(void*, void*, uint32_t, uint32_t*);
+	typedef uint8_t(*IClientUser_IsUserSubscribedAppInTicket_t)(void*, uint64_t, uint32_t);
+	typedef bool(*IClientUser_RequiresLegacyCDKey_t)(void*, uint32_t, uint32_t*);
 
-	extern DetourHook<TraceIPC_t>* TraceIPC;
+	typedef bool(*IClientUtils_GetOfflineMode_t)(void*);
 
-	extern DetourHook<CAPIJob_SendAndRecv_t>* CAPIJob_SendAndRecv;
+	typedef bool(*CWebSocketConnection_BBuildAndAsyncSendFrame_t)(void*, EWebSocketOpCode, uint8_t*, uint32_t);
+	typedef void*(*CRemoteClientManager_RecvPkt_t)(void*, CRemoteClientPacket*);
 
-	extern DetourHook<CAppDataCache_BParseResponseFromMessage_t>* CAppDataCache_BParseResponseFromMessage;
+	typedef bool(*CJobMgr_BRouteMsgToJob_t)(void*, void*, void*, void*);
 
-	extern DetourHook<CClientUnifiedServiceMethod_SendAndRecvMsg_t>* CClientUnifiedServiceMethod_SendAndRecvMsg;
+	typedef bool(*CDepotDownloadMgr_BYldRequestDepotManifest_t)(void*, uint32_t, uint32_t, uint64_t, const char*, void*);
 
-	extern DetourHook<CCMInterface_RecvPkt_t>* CCMInterface_RecvPkt;
+	extern DetourHook<TraceIPC_t> TraceIPC;
 
-	extern DetourHook<CSteamMatchmakingServers_GetServerDetails_t>* CSteamMatchmakingServers_GetServerDetails;
-	extern DetourHook<CSteamMatchmakingServers_RequestInternetServerList_t>* CSteamMatchmakingServers_RequestInternetServerList;
+	extern DetourHook<CAPIJob_GetPlayerStats_t> CAPIJob_GetPlayerStats;
 
-	extern DetourHook<CSteamEngine_ProcessIPCFrame_t>* CSteamEngine_ProcessIPCFrame;
-	extern DetourHook<CSteamEngine_SetAppIdForCurrentPipe_t>* CSteamEngine_SetAppIdForCurrentPipe;
+	extern DetourHook<CProtoBufMsgBase_InitFromPacket_t> CProtoBufMsgBase_InitFromPacket;
+	extern DetourHook<CCMInterface_RecvPkt_t> CCMInterface_RecvPkt;
+	extern DetourHook<CProtoBufMsgBase_Send_t> CProtoBufMsgBase_Send;
 
-	extern DetourHook<CUDPConnection_BAsyncSend_t>* CUDPConnection_BAsyncSend;
+	extern DetourHook<CWebSocketConnection_BBuildAndAsyncSendFrame_t> CWebSocketConnection_BBuildAndAsyncSendFrame;
+	extern DetourHook<CRemoteClientManager_RecvPkt_t> CRemoteClientManager_RecvPkt;
+	extern DetourHook<CJobMgr_BRouteMsgToJob_t> CJobMgr_BRouteMsgToJob;
+	extern DetourHook<CDepotDownloadMgr_BYldRequestDepotManifest_t> CDepotDownloadMgr_BYldRequestDepotManifest;
 
-	extern DetourHook<CUser_BIsSubscribedApp_t>* CUser_BIsSubscribedApp;
-	extern DetourHook<CUser_CheckAppOwnership_t>* CUser_CheckAppOwnership;
-	extern DetourHook<CUser_GetSubscribedApps_t>* CUser_GetSubscribedApps;
-	extern DetourHook<CUser_PostCallbackToAppId_t>* CUser_PostCallbackToAppId;
-	extern DetourHook<CUser_SpawnGameId_t>* CUser_SpawnGameId;
+	extern DetourHook<CSteamMatchmakingServers_GetServerDetails_t> CSteamMatchmakingServers_GetServerDetails;
+	extern DetourHook<CSteamMatchmakingServers_RequestInternetServerList_t> CSteamMatchmakingServers_RequestInternetServerList;
 
-	extern DetourHook<CUserAppManager_BuildDepotDependency_t>* CUserAppManager_BuildDepotDependency;
+	extern DetourHook<IClientAppManager_RunIPCFrame_t> IClientAppManager_RunIPCFrame;
+	extern DetourHook<IClientApps_RunIPCFrame_t> IClientApps_RunIPCFrame;
+	extern DetourHook<IClientRemoteStorage_RunIPCFrame_t> IClientRemoteStorage_RunIPCFrame;
+	extern DetourHook<IClientUGC_RunIPCFrame_t> IClientUGC_RunIPCFrame;
+	extern DetourHook<IClientUtils_RunIPCFrame_t> IClientUtils_RunIPCFrame;
+	extern DetourHook<IClientUser_RunIPCFrame_t> IClientUser_RunIPCFrame;
+	extern DetourHook<IClientUserStats_RunIPCFrame_t> IClientUserStats_RunIPCFrame;
 
-	extern DetourHook<CWebSocketConnection_BBuildAndAsyncSendFrame_t>* CWebSocketConnection_BBuildAndAsyncSendFrame;
+	extern DetourHook<CSteamEngine_Init_t> CSteamEngine_Init;
+	extern DetourHook<CSteamEngine_ProcessIPCFrame_t> CSteamEngine_ProcessIPCFrame;
+	extern DetourHook<CSteamEngine_SetAppIdForCurrentPipe_t> CSteamEngine_SetAppIdForCurrentPipe;
 
-	extern DetourHook<IClientConfigStore_SetString_t>* IClientConfigStore_SetString;
+	extern DetourHook<CUser_CheckAppOwnership_t> CUser_CheckAppOwnership;
+	extern DetourHook<CUser_GetSubscribedApps_t> CUser_GetSubscribedApps;
+	extern DetourHook<CUser_PostCallbackToAppId_t> CUser_PostCallbackToAppId;
 
-	extern DetourHook<IClientFriends_GetFriendGamePlayed_t>* IClientFriends_GetFriendGamePlayed;
+	extern DetourHook<IClientFriends_GetFriendGamePlayed_t> IClientFriends_GetFriendGamePlayed;
 
-	extern DetourHook<IClientRemoteStorage_IsCloudEnabledForApp_t>* IClientRemoteStorage_IsCloudEnabledForApp;
+	extern DetourHook<IClientAppManager_BCanRemotePlayTogether_t> IClientAppManager_BCanRemotePlayTogether;
 
-	typedef uint32_t(*IClientApps_GetDLCCount_t)(IClientApps*, AppId_t);
-	typedef bool(*IClientApps_GetDLCDataByIndex_t)(IClientApps*, AppId_t, uint32_t, AppId_t*, bool*, char*, steamsize_t);
+	extern DetourHook<IClientUser_BLoggedOn_t> IClientUser_BLoggedOn;
+	extern DetourHook<IClientUser_BUpdateAppOwnershipTicket_t> IClientUser_BUpdateAppOwnershipTicket;
+	extern DetourHook<IClientUser_GetAppOwnershipTicketExtendedData_t> IClientUser_GetAppOwnershipTicketExtendedData;
+	extern DetourHook<IClientUser_IsUserSubscribedAppInTicket_t> IClientUser_IsUserSubscribedAppInTicket;
+	extern DetourHook<IClientUser_RequiresLegacyCDKey_t> IClientUser_RequiresLegacyCDKey;
 
-	typedef bool(*IClientAppManager_BCanRemotePlayTogether_t)(IClientAppManager*, AppId_t);
-	typedef bool(*IClientAppManager_BIsDlcEnabled_t)(IClientAppManager*, AppId_t, AppId_t, bool*);
-	typedef bool(*IClientAppManager_GetUpdateInfo_t)(IClientAppManager*, AppId_t, uint32_t*);
-	typedef bool(*IClientAppManager_GetAppStateInfo_t)(IClientAppManager*, AppId_t, AppStateInfo_t*);
-	typedef void*(*IClientAppManager_LaunchApp_t)(IClientAppManager*, GameId_t*, uint32_t, uint32_t, const char*);
-	typedef bool(*IClientAppManager_IsAppDlcInstalled_t)(IClientAppManager*, AppId_t, AppId_t);
+	typedef bool(*IClientAppManager_BIsDlcEnabled_t)(void*, uint32_t, uint32_t, void*);
+	typedef bool(*IClientAppManager_GetAppUpdateInfo_t)(void*, uint32_t, uint32_t*);
+	typedef void*(*IClientAppManager_LaunchApp_t)(void*, uint32_t*, void*, void*, void*);
+	typedef bool(*IClientAppManager_IsAppDlcInstalled_t)(void*, uint32_t, uint32_t);
+	typedef unsigned int(*IClientApps_GetDLCCount_t)(void*, uint32_t);
+	typedef bool(*IClientApps_GetDLCDataByIndex_t)(void*, uint32_t, int, uint32_t*, bool*, char*, size_t);
+	typedef int32_t(*IClientApps_GetAppData_t)(void*, uint32_t, const char*, char*, uint32_t);
+	typedef bool(*IClientRemoteStorage_IsCloudEnabledForApp_t)(void*, uint32_t);
+	typedef uint32_t(*IClientUtils_GetAppId_t)(void*);
 
-	typedef bool(*IClientUser_BLoggedOn_t)(IClientUser*);
-	typedef uint32_t(*IClientUser_BUpdateAppOwnershipTicket_t)(IClientUser*, AppId_t, bool);
-	typedef uint32_t(*IClientUser_GetAppOwnershipTicketExtendedData_t)(IClientUser*, uint32_t, void*, uint32_t, uint32_t*, uint32_t*, uint32_t*, uint32_t*);
-	typedef bool(*IClientUser_GetLegacyCDKey_t)(IClientUser*, AppId_t, char*, steamsize_t);
-	typedef CSteamId(*IClientUser_GetSteamId_t)(IClientUser*);
-	typedef uint8_t(*IClientUser_IsUserSubscribedAppInTicket_t)(IClientUser*, uint64_t, AppId_t);
+	extern VFTHook<IClientAppManager_BIsDlcEnabled_t> IClientAppManager_BIsDlcEnabled;
+	extern VFTHook<IClientAppManager_GetAppUpdateInfo_t> IClientAppManager_GetAppUpdateInfo;
+	extern VFTHook<IClientAppManager_LaunchApp_t> IClientAppManager_LaunchApp;
+	extern VFTHook<IClientAppManager_IsAppDlcInstalled_t> IClientAppManager_IsAppDlcInstalled;
 
-	typedef AppId_t(*IClientUtils_GetAppId_t)(IClientUtils*);
-	typedef bool(*IClientUtils_GetOfflineMode_t)(IClientUtils*);
+	extern VFTHook<IClientApps_GetDLCDataByIndex_t> IClientApps_GetDLCDataByIndex;
+	extern VFTHook<IClientApps_GetDLCCount_t> IClientApps_GetDLCCount;
+	extern VFTHook<IClientApps_GetAppData_t> IClientApps_GetAppData;
 
-	extern VFTHook<IClientAppManager_BCanRemotePlayTogether_t>* IClientAppManager_BCanRemotePlayTogether;
-	extern VFTHook<IClientAppManager_BIsDlcEnabled_t>* IClientAppManager_BIsDlcEnabled;
-	extern VFTHook<IClientAppManager_GetUpdateInfo_t>* IClientAppManager_GetUpdateInfo;
-	extern VFTHook<IClientAppManager_GetAppStateInfo_t>* IClientAppManager_GetAppStateInfo;
-	extern VFTHook<IClientAppManager_LaunchApp_t>* IClientAppManager_LaunchApp;
-	extern VFTHook<IClientAppManager_IsAppDlcInstalled_t>* IClientAppManager_IsAppDlcInstalled;
+	extern VFTHook<IClientRemoteStorage_IsCloudEnabledForApp_t> IClientRemoteStorage_IsCloudEnabledForApp;
 
-	extern VFTHook<IClientApps_GetDLCDataByIndex_t>* IClientApps_GetDLCDataByIndex;
-	extern VFTHook<IClientApps_GetDLCCount_t>* IClientApps_GetDLCCount;
+	extern VFTHook<IClientUser_GetEncryptedAppTicket_t> IClientUser_GetEncryptedAppTicket;
 
-	extern VFTHook<IClientUser_BLoggedOn_t>* IClientUser_BLoggedOn;
-	extern VFTHook<IClientUser_BUpdateAppOwnershipTicket_t>* IClientUser_BUpdateAppOwnershipTicket;
-	extern VFTHook<IClientUser_GetAppOwnershipTicketExtendedData_t>* IClientUser_GetAppOwnershipTicketExtendedData;
-	extern VFTHook<IClientUser_GetLegacyCDKey_t>* IClientUser_GetLegacyCDKey;
-	extern VFTHook<IClientUser_GetSteamId_t>* IClientUser_GetSteamId;
-	extern VFTHook<IClientUser_IsUserSubscribedAppInTicket_t>* IClientUser_IsUserSubscribedAppInTicket;
+	extern VFTHook<IClientUtils_GetAppId_t> IClientUtils_GetAppId;
+	extern VFTHook<IClientUtils_GetOfflineMode_t> IClientUtils_GetOfflineMode;
 
-	extern VFTHook<IClientUtils_GetAppId_t>* IClientUtils_GetAppId;
-	extern VFTHook<IClientUtils_GetOfflineMode_t>* IClientUtils_GetOfflineMode;
+	typedef void(*ISteamMatchmakingPingResponse_ServerResponded_t)(void*, gameserverdetails_t*);
 
 
-	//steamui.so
-	typedef void(*CGameInfoDialog_ServerResponded_t)(void*, gameserverdetails_t*);
-
-	extern DetourHook<CGameInfoDialog_ServerResponded_t>* CGameInfoDialog_ServerResponded;
-
-	bool init();
-	void setupAll();
-	void placeAll();
-	void placeVFTHooks();
-	void removeAll(const bool deleteAll = false);
+	extern DetourHook<ISteamMatchmakingPingResponse_ServerResponded_t> ISteamMatchmakingPingResponse_ServerResponded;
+	bool setup();
+	void place();
+	void remove();
 }

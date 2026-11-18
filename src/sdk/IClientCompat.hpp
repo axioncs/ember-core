@@ -1,18 +1,15 @@
-#pragma once
 
-#include "CUtl.hpp"
-#include "types.hpp"
+#pragma once
 
 #include <cstdint>
 
-
-SDK_Class IClientCompat
+class IClientCompat
 {
 public:
-	bool isCompatToolEnabled(const AppId_t appId);
-	const char* getDisplayName(const char* name);
-	const char* getCompatToolName(const AppId_t appId);
-
-	//Set name to "" to unset
-	void specifyCompatTool(const AppId_t appId, const char* name, const char* config, int32_t priority);
+	void specifyCompatTool(
+		std::uint32_t appId,
+		const char* name,
+		const char* config,
+		int priority);
+	const char* getCompatToolName(std::uint32_t appId);
 };

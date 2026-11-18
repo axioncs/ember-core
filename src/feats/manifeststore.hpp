@@ -1,21 +1,41 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+
 
 #pragma once
 
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
 namespace ManifestStore
 {
-	// Copy <depot>_<gid>.manifest from ~/.config/ember/manifests into the
-	// Steam depotcache. Idempotent; safe on every config reload.
-	void publish();
+	using ArchivedGidIndex = std::unordered_map<std::uint32_t, std::uint64_t>;
 
-	// Restage one pinned manifest; the client drops depotcache entries when an
-	// update is cancelled.
-	enum class StageResult
-	{
-		Present,
-		Copied,
-		Missing,
-	};
+	std::string dir();
 
-	StageResult stage(unsigned int depotId, unsigned long long manifestId);
+	void archiveDepot(uint32_t depotId);
+	void archiveDepots(const std::vector<uint32_t>& depotIds);
+
+	bool archiveManifest(uint32_t depotId, uint64_t gid);
+
+	bool publishDownloadedManifest(uint32_t depotId, uint64_t gid,
+	                               const std::string& sourcePath);
+
+	bool isInDepotcache(uint32_t depotId, uint64_t gid);
+	bool isArchived(uint32_t depotId, uint64_t gid);
+
+	std::optional<uint64_t> installedSize(uint32_t depotId, uint64_t gid);
+	void cacheInstalledSize(uint32_t depotId, uint64_t gid, uint64_t size);
+
+	bool restoreToDepotcache(uint32_t depotId, uint64_t gid);
+
+	bool markPreferredGid(uint32_t depotId, uint64_t gid);
+	uint64_t preferredArchivedGid(uint32_t depotId, uint64_t excludeGid);
+
+	uint64_t bestArchivedGid(uint32_t depotId, uint64_t excludeGid);
+
+	ArchivedGidIndex archivedGidIndex();
+
+	void purgeDepots(const std::vector<uint32_t>& depotIds);
 }

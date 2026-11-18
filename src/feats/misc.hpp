@@ -1,10 +1,14 @@
 #pragma once
 
-#include "../sdk/sdk.hpp"
-
+class CProtoBufMsgBase;
+class CMsgClientWalletInfoUpdate;
+class CMsgClientEmailAddrInfo;
 
 namespace Misc
 {
 	bool shouldFakeOffline();
-	void recvMsg(CNetPacket* pkt);
+	void recvMsg(CProtoBufMsgBase* msg);
+
+	bool recvWalletInfo(CMsgClientWalletInfoUpdate* body);
+	bool recvEmailInfo(CMsgClientEmailAddrInfo* body);
 }

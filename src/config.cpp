@@ -1,383 +1,537 @@
 #include "config.hpp"
+#include "config_path.hpp"
+
+#include "afftrace.hpp"
+#include "confload.hpp"
 #include "config_default.hpp"
-
-#include "feats/apps.hpp"
-#include "feats/manifeststore.hpp"
-#include "feats/stplugin.hpp"
-
 #include "filewatcher.hpp"
 #include "log.hpp"
-#include "lua.hpp"
-#include "utils.hpp"
-
 #include "yaml-cpp/yaml.h"
 
+#include "feats/appinfo_provision.hpp"
+#include "feats/apps.hpp"
+#include "feats/depotkey.hpp"
+#include "config_discovery.hpp"
+#include "feats/hotreload.hpp"
+#include "feats/manifestdonor_policy.hpp"
+#include "feats/manifestid.hpp"
+#include "feats/ticket.hpp"
+
+#include <cerrno>
+#include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
-#include <cstring>
-#include <cctype>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
-#include <iterator>
 #include <sstream>
 #include <string>
 
-
-std::unique_ptr<CFileWatcher> CConfig::watcher = std::make_unique<CFileWatcher>(onFileChange);
-
-std::filesystem::path CConfig::getDir()
+namespace
 {
-	std::ostringstream path;
 
-	const char* configDir = getenv("XDG_CONFIG_HOME"); //Most users should have this set iirc
-	if (configDir)
+	bool parsePinGid(const std::string& s, uint64_t& out)
 	{
-		path << configDir;
-	}
-	else
-	{
-		LOG_CUSTOM(k_ELogLevelWarn | k_ELogLevelOnce, "XDG_CONFIG_HOME not set! Falling back to HOME\n");
-
-		const char* home = getenv("HOME");
-		path << home << "/.config";
+		if (s.empty()) return false;
+		errno = 0;
+		char* end = nullptr;
+		const unsigned long long v = std::strtoull(s.c_str(), &end, 10);
+		if (errno != 0 || end == s.c_str() || *end != '\0') return false;
+		out = static_cast<uint64_t>(v);
+		return true;
 	}
 
-	path << "/ember";
+	bool readFileText(const std::string& path, std::string& out)
+	{
+		std::ifstream f(path, std::ios::binary);
+		if (!f.is_open()) return false;
+		std::ostringstream ss;
+		ss << f.rdbuf();
+		out = ss.str();
+		return true;
+	}
 
-	return path.str();
+	bool writeFileTextAtomic(const std::string& path, const std::string& text)
+	{
+		const std::string tmp = path + ".emberheal.tmp";
+		{
+			std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+			if (!f.is_open()) return false;
+			f << text;
+			f.flush();
+			if (!f.good()) return false;
+		}
+		std::error_code ec;
+		std::filesystem::rename(tmp, path, ec);
+		if (ec)
+		{
+			std::filesystem::remove(tmp, ec);
+			return false;
+		}
+		return true;
+	}
 }
 
-std::filesystem::path CConfig::getPath()
+std::string CConfig::getDir()
 {
-	auto dir = getDir();
-	dir.append("config.yaml");
-
-	return dir;
+	return ConfigPath::emberConfigDir(
+	    std::getenv("XDG_CONFIG_HOME"), std::getenv("HOME"));
 }
 
-void CConfig::onFileChange(__attribute__((unused)) const std::filesystem::path& path, __attribute__((unused)) const int eventMask)
+std::string CConfig::getPath()
 {
-	g_config.loadSettings();
-	LOG_NOTIFY("Config reloaded!");
+	return getDir().append("/config.yaml");
 }
 
-bool CConfig::createFile() const
+std::string CConfig::getLuaAppIdsPath()
 {
-	const std::string path = getPath();
+	return getDir().append("/luaappids.yaml");
+}
+
+static std::string findSteamRootForConfig()
+{
+	const char* home = std::getenv("HOME");
+	if (!home) return "";
+	const std::vector<std::string> candidates = {
+		std::string(home) + "/.steam/steam",
+		std::string(home) + "/.steam/debian-installation",
+		std::string(home) + "/.local/share/Steam"
+	};
+	for (const auto& candidate : candidates)
+	{
+		if (std::filesystem::exists(candidate + "/steam.sh"))
+		{
+			return candidate;
+		}
+	}
+	return "";
+}
+
+std::unordered_set<uint32_t> CConfig::discoverStPluginAppIds()
+{
+	std::unordered_set<uint32_t> result;
+	const auto steamRoot = findSteamRootForConfig();
+	if (steamRoot.empty()) return result;
+
+	const auto stplug = steamRoot + "/config/stplug-in";
+	if (!std::filesystem::exists(stplug)) return result;
+
+	std::error_code ec;
+	for (const auto& entry : std::filesystem::directory_iterator(stplug, ec))
+	{
+		if (!entry.is_regular_file()) continue;
+		const auto& path = entry.path();
+		if (path.extension() != ".lua") continue;
+
+		const uint32_t appIdStem =
+		    ConfigDiscovery::appIdFromScriptName(path.filename().string());
+		if (ConfigDiscovery::keepDiscoveredMainApp(
+		        appIdStem, false))
+		{
+			result.insert(appIdStem);
+		}
+	}
+
+	for (const uint32_t appId : ConfigDiscovery::recoverRacyScanDrops(
+	         result, managedAppIds.get(),
+	         [&](uint32_t id) {
+		         std::error_code fex;
+		         return std::filesystem::exists(
+		             stplug + "/" + std::to_string(id) + ".lua", fex);
+	         }))
+	{
+		result.insert(appId);
+	}
+	return result;
+}
+
+std::unordered_set<uint32_t> CConfig::loadLuaAppIdsYaml()
+{
+	std::unordered_set<uint32_t> result;
+	const auto path = getLuaAppIdsPath();
+	if (!std::filesystem::exists(path)) return result;
+
+	try
+	{
+		YAML::Node node = YAML::LoadFile(path);
+		if (node && node["AdditionalApps"])
+		{
+			for (auto subNode : node["AdditionalApps"])
+			{
+				try
+				{
+					const uint32_t val = subNode.as<uint32_t>();
+					if (ConfigDiscovery::keepDiscoveredMainApp(
+					        val, false))
+					{
+						result.insert(val);
+					}
+				}
+				catch (...) {}
+			}
+		}
+	}
+	catch (...) {}
+
+	return result;
+}
+
+bool CConfig::createFile()
+{
+	std::string path = getPath();
 	if (!std::filesystem::exists(path))
 	{
-		const std::string dir = getDir();
+		std::string dir = getDir();
 		if (!std::filesystem::exists(dir))
 		{
 			if (!std::filesystem::create_directory(dir))
 			{
-				LOG_NOTIFY("Unable to create config directory at %s!\n", dir.c_str());
+				g_pLog->notify("Unable to create config directory at %s!\n", dir.c_str());
+				g_pLog->notifyUser(UserMsg::ConfigWriteFailed);
 				return false;
 			}
 
-			LOG_DEBUG("Created config directory at %s\n", dir.c_str());
+			g_pLog->debug("Created config directory at %s\n", dir.c_str());
 		}
 
-		auto config = std::ofstream(path);
-		if (!config.is_open())
+		FILE* file = fopen(path.c_str(), "w");
+		if (!file)
 		{
-			LOG_NOTIFY("Unable to create %s!", path.c_str());
+			g_pLog->notify("Unable to create config at %s!\n", path.c_str());
+			g_pLog->notifyUser(UserMsg::ConfigWriteFailed);
 			return false;
 		}
 
-		config << defaultConfig;
-		config.close();
+		fputs(defaultConfig, file);
+		fflush(file);
+		fclose(file);
 	}
 
 	return true;
 }
 
-namespace
+static void onFileChange()
 {
-	constexpr int32_t kConfigVersion = 2;
 
-	// Splits the embedded template into top-level blocks: each is the run of
-	// comment/blank lines that introduce a key, the key line, and its indented
-	// body. Keeps the file's own comments when a block is appended.
-	std::vector<std::pair<std::string, std::string>> templateBlocks()
+	auto watchSpan = AffTrace::watchSpan(AffTrace::Src::Config);
+
+	const auto before = g_config.addedAppIds.get();
+	const auto beforeManaged = g_config.managedAppIds.get();
+
+	g_config.loadSettings();
+
+	const auto after = g_config.addedAppIds.get();
+	const auto afterManaged = g_config.managedAppIds.get();
+	const auto removals = ConfigDiscovery::classifyReloadRemovals(
+	    beforeManaged, afterManaged, before, after);
+
+	for (const uint32_t appId : removals.active)
 	{
-		std::vector<std::pair<std::string, std::string>> blocks;
-		std::istringstream stream(defaultConfig);
-		std::string line;
-		std::string pending;
-
-		while (std::getline(stream, line))
-		{
-			const bool isComment = line.empty() || line[0] == '#';
-			const bool isKey = !isComment && line[0] != ' ' && line[0] != '	' && line.find(':') != std::string::npos;
-
-			if (isComment)
-			{
-				pending += line + "\n";
-				continue;
-			}
-
-			if (isKey)
-			{
-				const auto colon = line.find(':');
-				blocks.emplace_back(line.substr(0, colon), pending + line + "\n");
-				pending.clear();
-				continue;
-			}
-
-			if (!blocks.empty())
-			{
-				blocks.back().second += line + "\n";
-			}
-			else
-			{
-				pending += line + "\n";
-			}
-		}
-
-		return blocks;
+		const bool ticketsForgotten = Ticket::forgetApp(appId);
+		const bool cacheForgotten = AppInfoProvision::forgetApp(appId);
+		g_pLog->info("Config watcher: removed app=%u cache=%s tickets=%s\n",
+		             appId, cacheForgotten ? "cleared" : "partial",
+		             ticketsForgotten ? "cleared" : "rejected");
 	}
 
-	bool hasKey(const std::string& text, const std::string& key)
+	for (const uint32_t appId : removals.managed)
 	{
-		std::istringstream stream(text);
-		std::string line;
-		while (std::getline(stream, line))
+		bool alsoActiveRemoved = false;
+		for (const uint32_t activeId : removals.active)
 		{
-			if (line.rfind(key + ":", 0) == 0)
+			if (activeId == appId)
 			{
-				return true;
+				alsoActiveRemoved = true;
+				break;
 			}
 		}
-		return false;
+		if (alsoActiveRemoved) continue;
+
+		const bool cacheForgotten =
+			AppInfoProvision::forgetManagedSourceApp(appId);
+		g_pLog->info("Config watcher: removed managed source app=%u cache=%s "
+		             "tickets=retained\n",
+		             appId, cacheForgotten ? "cleared" : "partial");
 	}
 
-	// Appends any template key the file is missing, so an older config picks up new
-	// settings with their documented defaults instead of warning about each one.
-	void migrateConfig(const std::filesystem::path& path)
+	DepotKey::reloadLuaScripts();
+	ManifestId::importLuaScripts();
+
+	for (uint32_t appId : after)
 	{
-		std::ifstream in(path);
-		if (!in.is_open())
+		if (!before.contains(appId))
 		{
-			return;
+			Ticket::restoreApp(appId);
 		}
-
-		const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-		in.close();
-
-		std::string append;
-		for (const auto& [key, block] : templateBlocks())
-		{
-			if (!hasKey(text, key))
-			{
-				append += "\n" + block;
-			}
-		}
-
-		if (append.empty())
-		{
-			return;
-		}
-
-		std::ofstream out(path, std::ios::app);
-		if (!out.is_open())
-		{
-			return;
-		}
-
-		out << "\n#--- keys added by config migration ---\n" << append;
 	}
+
+	HotReload::publish(afterManaged, true);
 }
 
 bool CConfig::init()
 {
-	if (!createFile())
-	{
-		LOG_WARN("Config creation failed!\n");
-		return false;
-	}
+	const bool created = createFile();
 
-	//TODO: Move to static init
-	if (watcher->addFile(getPath().c_str()) != -1)
+	loadSettings();
+
+	if(created)
 	{
-		// Dropping a script into stplug-in should not need a Steam restart.
-		for (const auto& dir : StPlugin::scriptDirs())
+		watcher = new CFileWatcher(onFileChange);
+		watcher->addFile(getPath().c_str());
+
+		watcher->addFile(getLuaAppIdsPath().c_str());
+		const auto steamRoot = findSteamRootForConfig();
+		if (!steamRoot.empty())
 		{
-			watcher->addFile(dir);
+
+			const auto stplug = steamRoot + "/config/stplug-in";
+			std::error_code stplugError;
+			std::filesystem::create_directories(stplug, stplugError);
+			if (!watcher->addFile(stplug.c_str()))
+			{
+
+				g_pLog->warn(
+				    "Config watcher: cannot watch %s (%s); adding a game will "
+				    "need a Steam restart\n",
+				    stplug.c_str(),
+				    stplugError ? stplugError.message().c_str()
+				                : "inotify_add_watch failed");
+			}
 		}
-		watcher->start();
-	}
-	else
-	{
-		LOG_NOTIFYERROR("Failed to watch config!\nHot reload will be unavailable");
+		else
+		{
+			g_pLog->warn("Config watcher: no Steam root; adding a game will need "
+			             "a Steam restart\n");
+		}
+
+		if (!watcher->start())
+		{
+			g_pLog->warn("Config watcher: watcher thread did not start; every "
+			             "change will need a Steam restart\n");
+		}
 	}
 
-	loadSettings(true);
 	return true;
 }
 
-void CConfig::setError(const ELoadError err, const char* keyName)
+CConfig::~CConfig()
 {
-	const auto prev = __loadErrors.copy();
-	std::ostringstream msg;
-
-	if (!prev.size())
+	if (watcher)
 	{
-		msg << "Config loading issues encountered:\n";
+		delete watcher;
+	}
+}
+
+void CConfig::setError(ELoadError err)
+{
+	if (__loadErrors.get() > err)
+	{
+		return;
+	}
+
+	__loadErrors = err;
+}
+
+bool CConfig::loadSettings()
+{
+
+	YAML::Node node;
+	std::string raw;
+	if (!readFileText(getPath(), raw))
+	{
+		g_pLog->notifyLong("Can not read config.yaml!\nUsing defaults");
+		g_pLog->notifyUser(UserMsg::ConfigUnreadable);
+		node = YAML::Node();
 	}
 	else
 	{
-		msg << prev << "\n";
-	}
+		std::string repaired;
+		const ConfLoad::Outcome outcome =
+		    ConfLoad::parseWithRepair(raw, node, repaired);
 
-	switch(err)
-	{
-		case ELoadError::MissingKey:
-			msg << "Missing " << keyName;
-			break;
-	
-		case ELoadError::ParsingException:
-			msg << "Failed to parse " << keyName;
-			break;
-
-		default:
-			break;
-	}
-
-	__loadErrors = msg.str();
-}
-
-bool CConfig::loadSettings(const bool firstLoad, const bool silent)
-{
-	rootNode = YAML::Node();
-
-	// Bring an older config up to the current schema before parsing it, so new
-	// keys arrive with their documented defaults instead of a warning each.
-	{
-		std::error_code ec;
-		const auto version = [&]() -> int32_t {
-			try
-			{
-				const auto node = YAML::LoadFile(getPath())["ConfigVersion"];
-				return node ? node.as<int32_t>() : 0;
-			}
-			catch (...)
-			{
-				return 0;
-			}
-		}();
-
-		if (version < kConfigVersion && std::filesystem::exists(getPath(), ec))
+		if (outcome == ConfLoad::Outcome::Failed)
 		{
-			migrateConfig(getPath());
-			LOG_INFO("Config migrated to schema version %i\n", kConfigVersion);
+			g_pLog->notifyLong("Error parsing config.yaml!\nUsing defaults");
+			g_pLog->notifyUser(UserMsg::ConfigParseFailed);
+			node = YAML::Node();
+		}
+		else if (outcome == ConfLoad::Outcome::Repaired)
+		{
+			if (writeFileTextAtomic(getPath(), repaired))
+				g_pLog->notify("Config had inconsistent list indentation; auto-repaired on disk\n");
+			else
+				g_pLog->notify("Config had inconsistent list indentation; repaired in memory (disk write failed)\n");
+			g_pLog->notifyUser(UserMsg::ConfigRepaired);
 		}
 	}
 
-	try
+	__loadErrors = ELoadError::None;
+
+	dlcData = dlcData.empty();
+	Apps::setConfiguredAppDlcIds({});
+
+	disableFamilyLock = getSetting<bool>(node, "DisableFamilyShareLock", true);
+	disableParentalRestrictions = getSetting<bool>(node, "DisableParentalRestrictions", false);
+	useWhiteList = getSetting<bool>(node, "UseWhitelist", false);
+	automaticFilter = getSetting<bool>(node, "AutoFilterList", true);
+	playNotOwnedGames = getSetting<bool>(node, "PlayNotOwnedGames", false);
+	smartTickets = getSetting<SmartTicketsFlags>(node, "SmartTickets", 1);
+
+	(void)getSetting<bool>(node, "SafeMode", false);
+	safeMode = false;
+	notifications = getSetting<bool>(node, "Notifications", true);
+	warnHashMissmatch = getSetting<bool>(node, "WarnHashMissmatch", false);
+	notifyInit = getSetting<bool>(node, "NotifyInit", true);
+	api = getSetting<bool>(node, "API", true);
+	fakeEmail = getSetting<std::string>(node, "FakeEmail", "");
+	fakeWalletBalance = getSetting<int32_t>(node, "FakeWalletBalance", 0);
+	disableCloud = getSetting<bool>(node, "DisableCloud", true);
+	autoUpdateApps = getSetting<bool>(node, "AutoUpdateApps", true);
+	DonateSettings donateSettings;
+	const YAML::Node donateNode = node["Donate"];
+	if (donateNode && donateNode.IsMap())
 	{
-		rootNode = YAML::LoadFile(getPath());
+		donateSettings.enabled = donateNode["Enabled"].as<bool>(donateSettings.enabled);
+		const std::string url = donateNode["Url"].as<std::string>(donateSettings.url);
+		if (ManifestDonor::isBaseUrlAllowed(url) && url.size() <= 2048)
+		{
+			donateSettings.url = url;
+			while (donateSettings.url.size() > 8 && donateSettings.url.back() == '/')
+				donateSettings.url.pop_back();
+		}
+		auto bounded = [&](const char* key, uint32_t low, uint32_t high, uint32_t& field)
+		{
+			const uint64_t value = donateNode[key].as<uint64_t>(field);
+			if (value >= low && value <= high) field = static_cast<uint32_t>(value);
+		};
+		bounded("IntervalSecs", 30, 86400, donateSettings.intervalSecs);
+		bounded("WantedRefreshSecs", 30, 86400, donateSettings.wantedRefreshSecs);
+		bounded("MaxMintsPerCycle", 1, 500, donateSettings.maxMintsPerCycle);
+		bounded("MinMintIntervalMs", 0, 60000, donateSettings.minMintIntervalMs);
+		bounded("MaxMintsPerSession", 0, 100000, donateSettings.maxMintsPerSession);
 	}
-	catch (...)
+	donate.set(donateSettings);
+	injectAllAdvertisedDlc = getSetting<bool>(node, "InjectAllAdvertisedDlc", false);
+	achievements = getSetting<bool>(node, "Achievements", true);
+	achievementOwnerId = getSetting<uint64_t>(node, "AchievementOwnerId", 76561198028121353ULL);
+	extendedLogging = getSetting<bool>(node, "ExtendedLogging", false);
+	patternCache = getSetting<bool>(node, "PatternCache", true);
+	asyncProvision = getSetting<bool>(node, "AsyncProvision", true);
+	logLevel = getSetting<unsigned int>(node, "LogLevel", 2);
+
+	maxManagedApps = static_cast<std::size_t>(getSetting<uint64_t>(
+		node, "MaxManagedApps",
+		static_cast<uint64_t>(ConfigDiscovery::kMaxManagedSourceApps)));
+
+	g_pLog->info(
+		"Config: DisableFamilyShareLock=%i DisableParentalRestrictions=%i "
+		"UseWhitelist=%i AutoFilterList=%i PlayNotOwnedGames=%i SafeMode=%i "
+		"Notifications=%i WarnHashMissmatch=%i NotifyInit=%i API=%i "
+		"FakeEmail=%s FakeWalletBalance=%i DisableCloud=%i Donate=%i "
+		"InjectAllAdvertisedDlc=%i Achievements=%i PatternCache=%i "
+		"AsyncProvision=%i ExtendedLogging=%i AutoUpdateApps=%i LogLevel=%u\n",
+		disableFamilyLock.get(), disableParentalRestrictions.get(),
+		useWhiteList.get(), automaticFilter.get(), playNotOwnedGames.get(),
+		safeMode.get(), notifications.get(), warnHashMissmatch.get(),
+		notifyInit.get(), api.get(), fakeEmail.get().c_str(),
+		fakeWalletBalance.get(), disableCloud.get(), donate.get().enabled,
+		injectAllAdvertisedDlc.get(),
+		achievements.get(), patternCache.get(), asyncProvision.get(),
+		extendedLogging.get(), autoUpdateApps.get(), logLevel.get());
+
+	appIds = getList<uint32_t>(node, "AppIds");
+
 	{
-		LOG_NOTIFYLONG("Failed loading config file! Using defaults");
-		rootNode = YAML::Node(); //Create empty node and let defaults kick in
+		auto stplugApps  = discoverStPluginAppIds();
+		auto luaYamlApps = loadLuaAppIdsYaml();
+		auto legacyApps  = getList<uint32_t>(node, "AdditionalApps");
+		ConfigDiscovery::InstalledApps installed;
+		const auto steamRoot = findSteamRootForConfig();
+		if (!steamRoot.empty())
+		{
+			const auto steamAppsRoots =
+			    ConfigDiscovery::steamAppsRootsFor(steamRoot);
+			installed = ConfigDiscovery::scanInstalledApps(steamAppsRoots);
+
+			for (const uint32_t appId : ConfigDiscovery::recoverRacyScanDrops(
+			         installed.all, installedAppIds.get(),
+			         [&](uint32_t id) {
+				         bool acc = false;
+				         return ConfigDiscovery::confirmInstalledApp(
+				             steamAppsRoots, id, acc);
+			         }))
+			{
+				bool isAccela = false;
+				if (ConfigDiscovery::confirmInstalledApp(
+				        steamAppsRoots, appId, isAccela))
+				{
+					installed.all.insert(appId);
+					if (isAccela) installed.accela.insert(appId);
+				}
+			}
+			installedAppIds = installed.all;
+		}
+
+		const std::size_t configuredCap = maxManagedApps.get();
+		const std::size_t effectiveCap = configuredCap != 0
+			? configuredCap
+			: stplugApps.size() + luaYamlApps.size();
+		const auto selected = ConfigDiscovery::selectManagedSources(
+			stplugApps, luaYamlApps, managedAppIds.get(), effectiveCap,
+			installed.all);
+		const auto ids = ConfigDiscovery::classifyAppIds(
+		    selected.active, {}, legacyApps, installed.all, installed.accela);
+
+		std::size_t installedLegacy = 0;
+		for (uint32_t appId : legacyApps)
+			if (installed.all.contains(appId)) ++installedLegacy;
+
+		g_pLog->info("App sources: stplug-in=%zu luaappids.yaml=%zu managed=%zu "
+		             "ignored-over-limit=%zu limit=%zu "
+		             "Accela-installed=%zu legacy-installed=%zu legacy-stale=%zu "
+		             "-> active=%zu\n",
+		             stplugApps.size(), luaYamlApps.size(), ids.managed.size(),
+		             selected.ignored, effectiveCap,
+		             installed.accela.size(), installedLegacy,
+		             legacyApps.size() - installedLegacy, ids.active.size());
+		if (selected.ignored != 0)
+		{
+			g_pLog->notify(
+			    "%zu script(s) exceed the MaxManagedApps safety limit (%zu) and "
+			    "are inactive this session; the files are untouched on disk. "
+			    "Raise MaxManagedApps in config.yaml (0 disables the limit) if "
+			    "this is intentional.\n",
+			    selected.ignored, effectiveCap);
+		}
+
+		std::string dateError;
+		if (!libraryDates.refresh(getDir(),
+		        steamRoot.empty() ? "" : steamRoot + "/config/stplug-in",
+		        ids.active, static_cast<uint32_t>(std::time(nullptr)), dateError))
+		{
+			g_pLog->infoOnce("Library dates: using session dates (%s)\n", dateError.c_str());
+		}
+		managedAppIds = ids.managed;
+		addedAppIds = ids.active;
 	}
 
-	Lua::fireCallback(Lua::Callbacks::SLSsteam_ConfigLoading);
+	fakeOffline = getList<uint32_t>(node, "FakeOffline");
 
-	__loadErrors = std::string("");
-	
-	//Parse logLevels first, otherwise settings won't get logged
-	logLevels = getSetting<LogLevelFlags_t>(rootNode, "LogLevels", 0xff, true);
-	api = getSetting<bool>(rootNode, "API", true);
-	if (api.copy())
-	{
-		logLevels = logLevels.copy() | k_ELogLevelAPI;
-	}
+	fakeAppIds = getMap<uint32_t, uint32_t>(node, "FakeAppIds");
+	appTokens = getMap<uint32_t, uint64_t>(node, "AppTokens");
+	achievementOwners = getMap<uint32_t, uint64_t>(node, "AchievementOwners");
+	gameTitles = getMap<uint32_t, std::string>(node, "GameTitles");
+	subscriptionTimestamps = getMap<uint32_t, uint32_t>(node, "SubscriptionTimestamps");
+	steamIdOverride = getMap<AppId_t, uint64_t>(node, "SteamIdOverride");
 
-	//This is shitty, but to do it properly have to do something even shittier
-	LOG_CUSTOM
-	(
-		k_ELogLevelInfo | k_ELogLevelOnce,
-		"LogLevels is \"%s\"\n",
-
-		ELogLevel_ToString(logLevels.copy()).c_str()
-	);
-
-	disableFamilyLock = getSetting<bool>(rootNode, "DisableFamilyShareLock", true);
-	useWhiteList = getSetting<bool>(rootNode, "UseWhitelist", false);
-	maxSchemaTries = getSetting<uint32_t>(rootNode, "MaxSchemaTries", 10);
-	safeMode = getSetting<bool>(rootNode, "SafeMode", false);
-	warnHashMissmatch = getSetting<bool>(rootNode, "WarnHashMissmatch", false);
-	notifyInit = getSetting<bool>(rootNode, "NotifyInit", true);
-	fakeName = getSetting<std::string>(rootNode, "FakeName", "");
-	fakeEmail = getSetting<std::string>(rootNode, "FakeEmail", "");
-	fakeWalletBalance = getSetting<int32_t>(rootNode, "FakeWalletBalance", 0);
-	plugins = getSetting<bool>(rootNode, "Plugins", false);
-	disableUpdates = getSetting<bool>(rootNode, "DisableUpdates", true);
-	cloud = getSetting<bool>(rootNode, "Cloud", true);
-
-	// Environment overrides, applied after the file so a declarative layer
-	// (the NixOS module) can set these without rewriting a file the user owns.
-	// config.yaml stays the user-editable source of truth; these win when set.
-	if (const char* v = getenv("EMBER_CLOUD"))
-	{
-		// 0/no/false (any case) disables; anything else leaves the default on.
-		std::string s(v);
-		for (auto& c : s) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
-		cloud.set(!(s == "0" || s == "no" || s == "false"));
-	}
-	if (const char* v = getenv("EMBER_CLOUD_REMOTE"))
-	{
-		cloudRemote.set(std::string(v));
-	}
-	if (const char* v = getenv("EMBER_CLOUD_FOLDER"))
-	{
-		cloudFolder.set(std::string(v));
-	}
-	dumpInterfaceMaps = getSetting<bool>(rootNode, "DumpClientInterfaces", false);
-	extendedLogging = getSetting<bool>(rootNode, "ExtendedLogging", false);
-
-	appIds = getList<AppId_t>(rootNode, "AppIds");
-	fakeOffline = getList<AppId_t>(rootNode, "FakeOffline");
-	depotBlacklist = getList<AppId_t>(rootNode, "DepotBlacklist");
-	depotLanguages = getSetting<std::string>(rootNode, "DepotLanguages", "");
-
-	fakeAppIds = getMap<AppId_t, AppId_t>(rootNode, "FakeAppIds");
-	manifestIds = getMap<AppId_t, uint64_t>(rootNode, "ManifestIds");
-	appTokens = getMap<AppId_t, uint64_t>(rootNode, "AppTokens");
-	cdKeys = getMap<AppId_t, std::string>(rootNode, "CDKeys", true);
-	gameTitles = getMap<AppId_t, std::string>(rootNode, "GameTitles");
-	subscriptionTimestamps = getMap<AppId_t, uint32_t>(rootNode, "SubscriptionTimestamps");
-	steamIdOverride = getMap<AppId_t, uint64_t>(rootNode, "SteamIdOverride");
-	launchOptions = getMap<AppId_t, std::string>(rootNode, "LaunchOptions");
-
-	setAdditionalApps(getList<AppId_t>(rootNode, "AdditionalApps"), firstLoad);
-
-	// stplug-in scripts are the self-maintaining source of app ids, depot keys
-	// and manifest pins. Merged after setAdditionalApps because that call
-	// overwrites addedAppIds wholesale.
-	StPlugin::mergeInto(StPlugin::parseAll());
-
-	// Pins are useless without the manifest files; publish whatever the store
-	// holds into depotcache before Steam resolves the depots.
-	ManifestStore::publish();
-
-	//Do not log the keys themself
-	for (const auto& key : cdKeys.copy())
-	{
-		LOG_CUSTOM(k_ELogLevelInfo | k_ELogLevelOnce, "Added CDKey for %u\n", key.first);
-	}
-
-	//Do not warn for these (yet?)
-	const auto idleStatusNode = rootNode["IdleStatus"];
+	const auto idleStatusNode = node["IdleStatus"];
 	if (idleStatusNode)
 	{
 		try
 		{
-			const auto appId = idleStatusNode["AppId"].as<AppId_t>();
-			const auto title = idleStatusNode["Title"].as<std::string>();
+			auto appId = idleStatusNode["AppId"].as<uint32_t>();
+			auto title = idleStatusNode["Title"].as<std::string>();
 
 			idleStatus = FakeGame_t
 			{
@@ -385,73 +539,91 @@ bool CConfig::loadSettings(const bool firstLoad, const bool silent)
 				title
 			};
 
-			LOG_CUSTOM(k_ELogLevelInfo | k_ELogLevelOnce, "Idle status %s with AppId %u\n", title.c_str(), appId);
+			g_pLog->info("Idle status %s with AppId %u\n", title.c_str(), appId);
 		}
 		catch(...)
 		{
-			//LOG_NOTIFYWARN("Failed to parse IdleStatus!");A
-			setError(ELoadError::ParsingException, "IdleStatus");
+
+			setError(ELoadError::ParsingException);
 		}
 	}
 
-	const auto dlcDataNode = rootNode["DlcData"];
-	if (dlcDataNode)
+	const auto dlcDataNode = node["DlcData"];
+	if(dlcDataNode)
 	{
-		auto _dlcData = dlcData.defaultInst();
+		auto _dlcData = dlcData.empty();
 
-		for (auto& app : dlcDataNode)
+		for(auto& app : dlcDataNode)
 		{
 			try
 			{
-				const AppId_t parentId = app.first.as<AppId_t>();
-				LOG_CUSTOM(k_ELogLevelInfo | k_ELogLevelOnce, "Parsing DlcData for %u\n", parentId);
-				const auto dlcIds = getMap<AppId_t, std::string>(dlcDataNode, std::to_string(parentId).c_str());
+				const uint32_t parentId = app.first.as<uint32_t>();
 
-				CDlcData& data = _dlcData[parentId];
+				CDlcData data;
 				data.parentId = parentId;
-				data.dlcIds = dlcIds;
+				g_pLog->info("Adding DlcData for %u\n", parentId);
+
+				for(auto& dlc : app.second)
+				{
+					const uint32_t dlcId = dlc.first.as<uint32_t>();
+
+					const std::string dlcName = dlc.second.as<std::string>();
+
+					data.dlcIds[dlcId] = dlcName;
+					g_pLog->info("DlcId %u -> %s\n", dlcId, dlcName.c_str());
+				}
+
+				_dlcData[parentId] = data;
 			}
 			catch(...)
 			{
-				//LOG_NOTIFY("Failed to parse DlcData!");
-				setError(ELoadError::ParsingException, "DlcData");
+
+				setError(ELoadError::ParsingException);
 				break;
 			}
 		}
 
+		auto configuredDlcIds = selectConfiguredDlcIds(
+			managedAppIds.get(), _dlcData);
 		dlcData = _dlcData;
+		Apps::setConfiguredAppDlcIds(configuredDlcIds);
+		if (!configuredDlcIds.empty())
+		{
+			g_pLog->info(
+				"Config: authorized %zu explicit DLC id(s) for managed parents\n",
+				configuredDlcIds.size());
+		}
 	}
 	else
 	{
-		//LOG_NOTIFY("Missing DlcData entry in config!");
-		setError(ELoadError::MissingKey, "DlcData");
+
+		setError(ELoadError::MissingKey);
 	}
 
-	const auto denuvoGamesNode = rootNode["DenuvoGames"];
+	const auto denuvoGamesNode = node["DenuvoGames"];
 	if (denuvoGamesNode)
 	{
-		auto _denuvoGames = denuvoGames.defaultInst();
+		auto _denuvoGames = denuvoGames.empty();
 
 		for (auto& steamIdNode : denuvoGamesNode)
 		{
 			try
 			{
-				const uint64_t steamId = steamIdNode.first.as<uint64_t>();
-				_denuvoGames[steamId] = std::unordered_set<AppId_t>();
+				const uint32_t steamId = steamIdNode.first.as<uint32_t>();
+				_denuvoGames[steamId] = std::unordered_set<uint32_t>();
 
 				for (auto& appIdNode : steamIdNode.second)
 				{
-					const AppId_t appId = appIdNode.as<AppId_t>();
+					const uint32_t appId = appIdNode.as<uint32_t>();
 					_denuvoGames[steamId].emplace(appId);
 
-					//Again, not loggin SteamId because of privacy
-					LOG_CUSTOM(k_ELogLevelInfo | k_ELogLevelOnce, "Added DenuvoGame %u\n", appId);
+					g_pLog->info("Added DenuvoGame %u\n", appId);
 				}
 			}
 			catch (...)
 			{
-				//LOG_NOTIFY("Failed to parse DenuvoGames!");
-				setError(ELoadError::ParsingException, "DenuvoGames");
+
+				setError(ELoadError::ParsingException);
 			}
 		}
 
@@ -459,129 +631,156 @@ bool CConfig::loadSettings(const bool firstLoad, const bool silent)
 	}
 	else
 	{
-		//LOG_NOTIFY("Missing DenuvoGames entry in config!");
-		setError(ELoadError::MissingKey, "DenuvoGames");
+
+		setError(ELoadError::MissingKey);
 	}
 
-	Lua::fireCallback(Lua::Callbacks::SLSsteam_ConfigLoaded);
-
-	const auto errors = __loadErrors.copy();
-	if (!silent && errors.size())
 	{
-		//We know this isn't build by user input, so disabling the warning is fine for this line
-		#pragma GCC diagnostic push
-		#pragma GCC diagnostic ignored "-Wformat-security"
+		ManifestPins::PinMap pinMap;
+		const auto pinsNode = node["ManifestPins"];
+		if (pinsNode && pinsNode.IsMap())
+		{
+			for (auto& appNode : pinsNode)
+			{
+				try
+				{
+					const auto& idNode = appNode.first;
+					const auto& body = appNode.second;
 
-		LOG_NOTIFYWARN(errors.c_str());
+					const uint32_t appId =
+					    idNode.IsScalar() ? idNode.as<uint32_t>(0) : 0;
+					if (appId == 0) continue;
 
-		#pragma GCC diagnostic pop
+					if (!body.IsMap()) continue;
+
+					ManifestPins::AppPins app;
+					app.locked = body["locked"].as<bool>(false);
+					app.buildId = body["build_id"].as<uint32_t>(0);
+
+					const auto depotsNode = body["depots"];
+					if (depotsNode.IsMap())
+					{
+						for (auto& d : depotsNode)
+						{
+							if (!d.first.IsScalar() || !d.second.IsScalar())
+								continue;
+							const uint32_t depotId = d.first.as<uint32_t>(0);
+							if (depotId == 0) continue;
+							uint64_t gid = 0;
+							if (parsePinGid(d.second.as<std::string>(""), gid) &&
+							    gid != 0)
+							{
+								app.depots[depotId] = gid;
+							}
+						}
+					}
+					pinMap[appId] = app;
+				}
+				catch (...)
+				{
+					setError(ELoadError::ParsingException);
+				}
+			}
+		}
+
+		ManifestPins::purgeOrphans(pinMap, addedAppIds.get());
+
+		manifestPinsByApp.set(pinMap);
+		manifestPins.set(ManifestPins::flattenDepots(pinMap));
+		lockedApps.set(ManifestPins::lockedAppSet(pinMap));
+	}
+
+	switch(__loadErrors.get())
+	{
+		case ELoadError::MissingKey:
+			g_pLog->notify("Issues during config loading encountered! Missing key(s)");
+			break;
+		case ELoadError::ParsingException:
+			g_pLog->notify("Issues during config loading encountered! Parsing error(s)");
+			break;
+
+		default:
+			break;
 	}
 
 	return true;
 }
 
-bool CConfig::isAddedAppId(const AppId_t appId)
+bool CConfig::isAddedAppId(uint32_t appId)
 {
-	return addedAppIds.get()->contains(appId);
+	return addedAppIds.contains(appId);
 }
 
-void CConfig::setAdditionalApps(const std::unordered_set<AppId_t>& appIds, const bool firstLoad)
+uint64_t CConfig::getManifestPin(uint32_t depotId)
 {
-	auto _newApps = newApps.copy();
-	auto _removedApps = removedApps.copy();
-	const auto prevAppIds = addedAppIds.copy();
-
-	//No need to post a AppLicenseChanged_t callback
-	//when GetSubscribedApps hasn't been called yet
-	if (!firstLoad && Apps::applistRequested)
-	{
-		for (const auto& appId : prevAppIds)
-		{
-			if (appIds.contains(appId))
-			{
-				continue;
-			}
-
-			_removedApps.emplace(appId);
-			LOG_DEBUG("AppId %u removed from AdditionalApps\n", appId);
-		}
-		for (const auto& appId : appIds)
-		{
-			if (prevAppIds.contains(appId))
-			{
-				continue;
-			}
-
-			_newApps.emplace(appId);
-			LOG_DEBUG("AppId %u added to AdditionalApps\n", appId);
-		}
-	}
-
-	newApps = _newApps;
-	removedApps = _removedApps;
-	addedAppIds = appIds;
+	return ManifestPins::getPin(manifestPins.get(), depotId);
 }
 
-bool CConfig::shouldExcludeAppId(const AppId_t appId, const bool ignoreAdditionalApps)
+uint64_t CConfig::getManifestPin(uint32_t appId, uint32_t depotId)
+{
+	return ManifestPins::getPinForContext(manifestPinsByApp.get(), appId, depotId);
+}
+
+uint64_t CConfig::getManifestPinForPlanner(uint32_t appId, uint32_t depotId)
+{
+	return ManifestPins::getPinForPlannerEntry(
+	    manifestPinsByApp.get(), appId, depotId);
+}
+
+bool CConfig::isAppLocked(uint32_t appId)
+{
+	return ManifestPins::isLocked(lockedApps.get(), appId);
+}
+
+std::unordered_map<uint32_t, uint64_t>
+CConfig::getAppPinnedDepots(uint32_t appId)
+{
+	const auto pinMap = manifestPinsByApp.get();
+	const auto it = pinMap.find(appId);
+	if (it == pinMap.end()) return {};
+	return it->second.depots;
+}
+
+void CConfig::purgePinsForApps(const std::unordered_set<uint32_t>& appIds)
+{
+	auto pinMap = manifestPinsByApp.get();
+	ManifestPins::purgeApps(pinMap, appIds);
+	manifestPinsByApp.set(pinMap);
+	manifestPins.set(ManifestPins::flattenDepots(pinMap));
+	lockedApps.set(ManifestPins::lockedAppSet(pinMap));
+}
+
+bool CConfig::shouldExcludeAppId(uint32_t appId)
 {
 	bool exclude = false;
-	//Proper way would be with getAppType, but that seems broken so we need to do this instead
-	constexpr AppId_t ONE_BILLION = 1E9; //Implicit cast from double to unsigned int, hopefully this does not break anything
-	if (appId >= ONE_BILLION) //Higher and equal to 10^9 gets used by Steam Internally
+
+	constexpr uint32_t ONE_BILLION = 1E9;
+	if (appId >= ONE_BILLION)
 	{
 		exclude = true;
 	}
 	else
 	{
-		const bool whitelist = useWhiteList.copy();
-		const bool found = appIds.get()->contains(appId);
-		exclude = (!isAddedAppId(appId) || ignoreAdditionalApps) && ((whitelist && !found) || (!whitelist && found));
-
-		if (!ignoreAdditionalApps)
-		{
-			const auto usr = g_pSteamEngine->getUser();
-			const auto appInfo = usr->getClientApps();
-
-			//Might be worth to check for APPTYPE_DLC, but knowing Valve & individual gamedevs
-			//surely not every DLC will be tagged as such
-			char chParent[16] { };
-			const int len = usr ? appInfo->getAppData(appId, "parent", chParent, sizeof(chParent)) : 0;
-			//Do not blindly trust len, nor the str included. Some devs just like to mess with Valve or something (for example appId 221300)
-			if (len > 0 && Utils::isNumber(chParent))
-			{
-				//LOG_DEBUG("AppId %i, parent %s (%i)\n", appId, chParent, len);
-				AppId_t parentId = std::stoul(chParent);
-
-				if (whitelist && !shouldExcludeAppId(parentId, true))
-				{
-					//LOG_DEBUG("Override exclude %i with false, because parent %u isn't excluded\n", exclude, parentId);
-					exclude = false;
-				}
-				else if (!whitelist && shouldExcludeAppId(parentId, true))
-				{
-					//LOG_DEBUG("Override exclude %i with true, because parent %u is excluded\n", exclude, parentId);
-					exclude = true;
-				}
-			}
-		}
+		bool found = appIds.get().contains(appId);
+		exclude = !isAddedAppId(appId) && ((useWhiteList.get() && !found) || (!useWhiteList.get() && found));
 	}
 
-	LOG_ONCE("shouldExcludeAppId(%u) -> %i\n", appId, exclude);
+	g_pLog->debugOnce("shouldExcludeAppId(%u) -> %i\n", appId, exclude);
 	return exclude;
 }
 
-CSteamId CConfig::getDenuvoGameOwner(const AppId_t appId)
+uint32_t CConfig::getDenuvoGameOwner(uint32_t appId)
 {
-	for (const auto& tpl : denuvoGames.copy())
+	for(const auto& tpl : denuvoGames.get())
 	{
 		if (tpl.second.contains(appId))
 		{
-			//LOG_ONCE("%u is DenuvoGame\n", appId);
-			return CSteamId(tpl.first);
+
+			return tpl.first;
 		}
 	}
 
-	return CSteamId();
+	return 0;
 }
 
 CConfig g_config = CConfig();

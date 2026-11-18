@@ -21,22 +21,30 @@
 #  AppId1: FakeAppId1
 #  AppId2: FakeAppId2
 
-#Disables Family Share license locking for self. This only disables the client side lock
-#You will still get kicked if you do not use something like FakeAppIds when a license is in use
-#by someone else
-DisableFamilyShareLock: no
+#Disables Family Share license locking for self and others
+DisableFamilyShareLock: yes
+
+#Locally unlocks Steam areas restricted by parental controls. Requires restart.
+DisableParentalRestrictions: no
 
 #Switches to whitelist instead of the default blacklist
 UseWhitelist: no
 
-#List of AppIds to ex-/include. Either specify each DLC you want to in-/exclude individually
-#or add the DLC's parent AppId (the Game's one) to allow unlocking all of their child AppIds
+#Automatically filter Apps in CheckAppOwnership. Filters everything but Games and Applications. Should not affect DLC checks
+#Overrides black-/whitelist. Gets overriden by AdditionalApps
+AutoFilterList: yes
+
+#List of AppIds to ex-/include
 AppIds:
 
-#Additional AppIds to inject (Overrides OwnerIds for apps you got shared! This breaks downloads)
-#Best to use this only on games NOT in your library.
-#AppIds on this list will automatically get added to your AppIds setting aswell, but only for the initial check.
-#It will get ignored in exclusion checks for the parent AppId
+#Enables playing of not owned games. Respects black-/whitelist AppIds
+PlayNotOwnedGames: no
+
+#DO NOT ADD APPIDS HERE. Recent ember versions read the game list
+#directly from ~/.steam/steam/config/stplug-in. To add AppIDs manually
+#(without relying on stplug-in), use ~/.config/ember/luaappids.yaml.
+#This section is kept only for backward compatibility and will be removed
+#in future versions.
 AdditionalApps:
 
 #Extra Data for Dlcs belonging to a specific AppId. Only needed
@@ -46,11 +54,6 @@ DlcData:
 #Used to retrieve ProductInfo from Steam servers for some games
 AppTokens:
 
-#Legacy CD keys required by some games
-#Unless explicitly specified SLSsteam will generate a random 4 * 4 key using A-Z + 0-9 seeded by your accountId + appId
-#If you want to delete injected CD keys delete cdk_[number] from your localconfig.vdf
-CDKeys:
-
 #Fake Steam being offline for specified AppIds. Same format as AppIds
 FakeOffline:
 
@@ -58,21 +61,8 @@ FakeOffline:
 #Use 0 as a key to set for all unowned Apps
 #Do not run multiple apps under the same AppId simultaneously! It's possible but
 #will most likely cause undefined behaviour
-#The last app you launched will be used as the real appId
+#Requires access to /proc to read processes' real AppId from their environment (most distros allow this by default)
 FakeAppIds:
-
-#Override Depot manifest IDs
-#Use this to download older game versions or to lock a game to a specific version
-ManifestIds:
-
-#Never download these depots
-DepotBlacklist:
-
-#Depots whose appinfo language is not in this list are not installed.
-#Comma separated, appinfo names: english, japanese, german, french, ...
-#Empty = use the client's language. English audio usually lives in the main
-#content depot, so listing english only drops every speech pack.
-DepotLanguages: ""
 
 #Custom ingame statuses. Set AppId to 0 to disable
 IdleStatus:
@@ -94,62 +84,96 @@ DenuvoGames:
 #Either set to SteamId or to 0 to use the SteamId in the cached AppOwnershipTicket
 SteamIdOverride:
 
-#Automatically grab Achievement schemas from Steams CDN which makes them always up to date
-#Slows down game's loading page the first time you click them
-#If you don't want this set it to 0 and use tools/schema-grabber instead to grab them outside of steam
-#to get the achievement schemas. Doing so will revert to the previous behaviour of falling back to
-#the offline cache (appcache/stats) when a GetUserStats request fails
-MaxSchemaTries: 10
+#Makes steamId spoofing a lot smarter than the default by analyzing
+#an executable that freshly connected to the Steamclient. This might slow down game
+#startup times on slower disks (less than 10ms for SteamDRM, up to 20-2000ms for Denuvo on my SSD)
+#Requires access to /proc/gamepid
+#Created the same way as LogLevels
+#SteamDRM = 0x1
+#Denuvo = 0x2
+SmartTickets: 0x1
 
-#Override commands right in CUser::SpawnGame. Use %command% as special string, just like in Steam itself
-#Two special keys exist:
-#4294967294: Sets the launch option for all unowned apps
-#4294967295: Sets the launch option for all apps (gets overwritten by the unowned one, if it exists)
-LaunchOptions:
-
-#Automatically disable SLSsteam when steamclient.so does not match a predefined file hash that is known to work
-#You should enable this if you're planing to use SLSsteam with Steam Deck's gamemode
+#Automatically disable ember when steamclient.so does not match a predefined file hash that is known to work
+#You should enable this if you're planing to use ember with Steam Deck's gamemode
+#DEPRECATED / no-op: this option is force-disabled in code. The Steam wrapper's
+#crash-loop fail-safe now covers the Game Mode boot protection this guarded, so
+#an unknown client hash no longer disables ember. Setting it has no effect.
 SafeMode: no
+
+#Toggles notifications via notify-send
+Notifications: yes
 
 #Warn user via notification when steamclient.so hash differs from known safe hash
 #Mostly useful for development so I don't accidentally miss an update
 WarnHashMissmatch: no
 
-#Notify when SLSsteam is done initializing
+#Notify when ember is done initializing
 NotifyInit: yes
 
-#Enable sending commands to SLSsteam via /tmp/SLSsteam.API
+#Enable sending commands to ember via /tmp/ember.API
 API: no
 
-#Enable the usage of Lua plugins from the plugins subdirectory
-#SLSsteam plugins can run arbitrary code! So only run plugins you trust
-Plugins: no
+#Disable cloud saves for unlocked games. Default "no" so CloudRedirect (shipped
+#with this stack) can sync saves to your own provider. Set to "yes" if you are
+#NOT using CloudRedirect, to avoid a doomed cloud sync that Steam rejects.
+DisableCloud: no
 
-#Saves for games you added are stored in ~/.config/ember/cloud and served to
-#Steam from there, because Steam refuses cloud saves for apps the account does
-#not own. Games you do own keep using Steam's own cloud untouched.
+#Keep managed games on the latest build. Default "yes" (games auto-update).
+#Set to "no" to lock every managed game to its currently installed build (like
+#LuaTools' "Auto Update Apps" toggle). Builds you pin per game still apply.
+AutoUpdateApps: yes
+
+# Share short-lived manifest request codes for depots this account really owns.
+# The wanted list is downloaded from the archive; only matching depots are sent.
+# Set Enabled: no to disable both active requests and passive capture.
+Donate:
+  Enabled: yes
+  Url: "https://manifest.luastools.xyz"
+  IntervalSecs: 30
+  WantedRefreshSecs: 300
+  MaxMintsPerCycle: 25
+  MinMintIntervalMs: 2000
+  MaxMintsPerSession: 0 # 0 means no session cap
+
+# Inject every storefront-advertised DLC into package 0. Keep disabled by
+# default; content-backed DLC is still injected automatically.
+InjectAllAdvertisedDlc: no
+
+#Show achievements for unowned games. Steam only returns a game's achievement
+#schema to an account that owns it, so the schema is sourced from an owner (see
+#AchievementOwnerId). Set to "no" to disable achievement schema spoofing.
+Achievements: yes
+
+#Fallback account (SteamID64) used to read achievement schemas when a game has
+#no per-game override in AchievementOwners. Only the public schema is read; the
+#account is never signed in to.
+AchievementOwnerId: 76561198028121353
+
+#Per-game override of the achievement-schema source account. Same shape as
+#FakeAppIds:
+#AchievementOwners:
+#  AppId: SteamID64
+AchievementOwners:
+
+# Local pattern cache keyed by GNU build-id, module size, and mtime. Each
+# cached signature is rechecked before an address is accepted.
+PatternCache: yes
+
+# Refresh existing appinfo buffers from the PICS worker after Steam starts.
+# Apps without a complete cache still use the synchronous PICS fallback.
+AsyncProvision: yes
+
+# Safety valve for accidental bulk copies into config/stplug-in, NOT a limit on
+# how many games you can have. Steam's own license and appinfo reconciliation
+# stalls for minutes when tens of thousands of scripts are dropped in at once,
+# so only this many scripts are activated per session.
 #
-#On by default. Set to "no" to hand added games back to Steam (they get none),
-#or set it from NixOS with programs.ember.cloud = false.
-Cloud: yes
-
-#Which rclone remote ember cloud syncs that directory to, and the folder inside
-#it. Both are optional: without a remote, saves simply stay on this machine.
-#Set them from NixOS with programs.ember.cloudRemote / .cloudFolder.
-#
-#CloudFolder is namespaced to ember on purpose. Another save-sync tool uses
-#CloudRedirect, and its files look nothing like ember's - syncing into the same
-#folder would make each tool treat the other's data as stale and delete it.
-CloudRemote: ""
-CloudFolder: ember-cloud
-
-#Disable updates for AppIds on AdditionalApps
-#Only works for unowned games, since those do not get any depots from CUserAppManager::BuildDepotDependency.
-#For owned games use ManifestIds
-DisableUpdates: yes
-
-#Changes your Persona's Name clientsidedly
-FakeName: ""
+# The default sits far above any realistic library, and priority always goes to
+# luaappids.yaml entries, games already installed on disk, and games already
+# active in the session. Scripts beyond the limit are NEVER deleted: they stay
+# on disk and activate as soon as the set shrinks or you raise this value.
+# Set to 0 to disable the limit entirely.
+MaxManagedApps: 4096
 
 #Changes your account's E-Mail clientsided. Leave blank to disable
 FakeEmail: ""
@@ -158,26 +182,14 @@ FakeEmail: ""
 FakeWalletBalance: 0
 
 #Log levels:
-#Trace = 0x1 #Tracing
-#Once = 0x2 #Only log once
-#Debug = 0x4 #Debugging statements
-#Warn = 0x8 #Something went wrong but it's not terrible
-#Error = 0x10 #Something went wrong and it's terrible/can't be recovered from. Function failed
-#Info = 0x20 #Log for users/external tools
-#NotifyShort = 0x40
-#NotifyLong = 0x80
-#LogLevels below Warn are stripped from release versions
-#If you want to use them use a debug version
-#LogLevels are bitwise flags, so for example to only
-#show Long Notifications & Errors use 0x90 (calculated via 0x80 or 0x10)
-#Default enables everything
-LogLevels: 0xff
-
-#Decompile & dump all IClient*Map classes
-DumpClientInterfaces: no
+#Once = 0
+#Debug = 1
+#Info = 2
+#NotifyShort = 3
+#NotifyLong = 4
+#Warn = 5
+#None = 6
+LogLevel: 2
 
 #Logs all calls to Steamworks (this makes the logfile huge! Only useful for debugging/analyzing
 ExtendedLogging: no
-
-#Schema version of this file. Older files get the missing keys appended on load.
-ConfigVersion: 2

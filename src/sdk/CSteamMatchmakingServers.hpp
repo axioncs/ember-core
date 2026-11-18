@@ -1,26 +1,25 @@
 #pragma once
 
-#include "types.hpp"
+#include "steam.hpp"
 
 #include <cstdint>
 
-
-SDK_Struct servernetadr_t
+struct servernetadr_t
 {
-	uint16_t connectPort;	//0x0
-	uint16_t queryPort;		//0x2
-	uint32_t ip;			//0x4
-}; //0x8
+	uint16_t connectPort;
+	uint16_t queryPort;
+	uint32_t ip;
+};
 
-SDK_Struct gameserverdetails_t
+struct gameserverdetails_t
 {
 public:
 	union
 	{
-		servernetadr_t address;		//0x0
+		servernetadr_t address;
 		uint64_t ip64;
 	};
 
-	uint8_t __pad_0x0[0x88];	//0x8
+	uint8_t __pad_0x0[0x88];
 	AppId_t appId;
 };

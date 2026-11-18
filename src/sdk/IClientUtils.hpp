@@ -1,11 +1,12 @@
 #pragma once
 
-#include "types.hpp"
+#include "steam.hpp"
 
-
-SDK_Class IClientUtils
+class IClientUtils
 {
 public:
 	HSteamPipe getCurrentSteamPipe();
 	AppId_t getAppId();
 };
+
+extern IClientUtils* g_pClientUtils;

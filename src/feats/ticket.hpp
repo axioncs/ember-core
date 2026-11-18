@@ -1,27 +1,26 @@
 #pragma once
 
-#include "../sdk/sdk.hpp"
+#include "../sdk/CSteamID.hpp"
+#include "../sdk/steam.hpp"
 
-#include "../filewatcher.hpp"
-
-#include <filesystem>
-#include <memory>
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
+class CMsgClientGetAppOwnershipTicketResponse;
+class CMsgClientRequestEncryptedAppTicketResponse;
+class CProtoBufMsgBase;
 
 namespace Ticket
 {
-	constexpr int WATCH_MASK = IN_MODIFY | IN_MOVED_TO | IN_MOVED_FROM | IN_DELETE | IN_CREATE;
-	extern std::unique_ptr<CFileWatcher> fileWatcher;
-	void onFileChange(const std::filesystem::path& path, int eventMask);
 
-	enum class ETicketType
+	inline bool shouldStampAppOwnershipTicket(bool isAddedApp,
+	                                           bool isAddedAppDlc) noexcept
 	{
-		AppOwnershipTicket,
-		EncryptedAppOwnershipTicket
-	};
+		return isAddedApp || isAddedAppDlc;
+	}
 
 	class SavedTicket
 	{
@@ -36,53 +35,53 @@ public:
 	};
 
 	extern std::unordered_map<AppId_t, CSteamId> oneTimeSteamIdSpoof;
+	extern std::unordered_map<AppId_t, SavedTicket> ticketMap;
+	extern std::unordered_map<AppId_t, SavedTicket> encryptedTicketMap;
+	inline std::mutex cacheMutex;
+	inline std::unordered_set<uint32_t> invalidatedApps;
 
-	extern std::mutex ticketMapMutex;
-	extern std::unordered_map<AppId_t, std::shared_ptr<SavedTicket>> ticketMap;
-	extern std::unordered_map<AppId_t, std::shared_ptr<SavedTicket>> encryptedTicketMap;
-
-	constexpr const char* getTicketField(const ETicketType type)
+	inline bool forgetApp(uint32_t appId)
 	{
-		switch (type)
-		{
-			case ETicketType::AppOwnershipTicket:
-				return "ticket";
-			case ETicketType::EncryptedAppOwnershipTicket:
-				return "encryptedTicket";
-		}
-
-		throw std::runtime_error("Unknown ticket type!");
+		if (appId == 0) return false;
+		std::lock_guard<std::mutex> lock(cacheMutex);
+		invalidatedApps.insert(appId);
+		ticketMap.erase(appId);
+		encryptedTicketMap.erase(appId);
+		return true;
 	}
 
-	constexpr std::unordered_map<AppId_t, std::shared_ptr<Ticket::SavedTicket>>& getTicketMap(const ETicketType type)
+	inline bool isAppInvalidated(uint32_t appId)
 	{
-		switch (type)
-		{
-			case ETicketType::AppOwnershipTicket:
-				return ticketMap;
-
-			case ETicketType::EncryptedAppOwnershipTicket:
-				return encryptedTicketMap;
-		}
-
-		throw std::runtime_error("Unknown ticket type!");
+		if (appId == 0) return false;
+		std::lock_guard<std::mutex> lock(cacheMutex);
+		return invalidatedApps.contains(appId);
 	}
 
-	std::filesystem::path getTicketDir();
+	inline bool restoreApp(uint32_t appId)
+	{
+		if (appId == 0) return false;
+		std::lock_guard<std::mutex> lock(cacheMutex);
+		invalidatedApps.erase(appId);
+		return true;
+	}
 
-	//TODO: Fill with error checks
-	std::filesystem::path getTicketPath(const AppId_t appId, const ETicketType type);
-	std::shared_ptr<SavedTicket> getCachedTicket(const AppId_t appId, const ETicketType type);
-	bool saveTicketToCache(const AppId_t appId, const std::string& bytes, const CSteamId& owner, const ETicketType type);
+	std::string getTicketDir();
 
-	//Hooks
-	void closePipe(const HSteamPipe pipe);
-	void launchApp(const GameId_t gameId);
-	void getTicketOwnershipExtendedData(const AppId_t appId);
+	std::string getTicketPath(uint32_t appId);
+	SavedTicket getCachedTicket(uint32_t appId);
+	bool saveTicketToCache(CMsgClientGetAppOwnershipTicketResponse* resp);
 
-	//Netpacket stuff
-	void recvAppTicket(CNetPacket* pkt);
-	void recvEncryptedAppTicket(CNetPacket* pkt);
+	void closePipe(HSteamPipe pipe);
+	void connectPipe(HSteamPipe pipe);
+	void launchApp(uint32_t appId);
+	void getEncryptedAppTicket(uint32_t appId);
+	void getTicketOwnershipExtendedData(uint32_t appId);
 
-	void recvMsg(CNetPacket* pkt);
+	std::string getEncryptedTicketPath(uint32_t appId);
+	SavedTicket getCachedEncryptedTicket(uint32_t appId);
+	bool saveEncryptedTicketToCache(CMsgClientRequestEncryptedAppTicketResponse* resp);
+
+	bool recvEncryptedAppTicket(CMsgClientRequestEncryptedAppTicketResponse* msg);
+	bool recvAppTicket(CMsgClientGetAppOwnershipTicketResponse* msg);
+	void recvMsg(CProtoBufMsgBase* msg);
 }

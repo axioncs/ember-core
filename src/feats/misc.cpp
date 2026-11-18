@@ -1,90 +1,60 @@
 #include "misc.hpp"
 
+#include "../sdk/CProtoBufMsgBase.hpp"
 #include "../config.hpp"
-#include "../globals.hpp"
 
 #include "fakeappid.hpp"
 
-
 bool Misc::shouldFakeOffline()
 {
-	const AppId_t appId = FakeAppIds::getRealAppIdForCurrentPipe();
-	if (!appId || !g_config.fakeOffline.get()->contains(appId))
+	const uint32_t appId = FakeAppIds::getRealAppIdForCurrentPipe();
+	if (!appId || !g_config.fakeOffline.get().contains(appId))
 	{
 		return false;
 	}
 
-	LOG_ONCE("Faking offline mode for %u\n", appId);
+	g_pLog->infoOnce("Faking offline mode for %u\n", appId);
 	return true;
 }
 
-void Misc::recvMsg(CNetPacket *pkt)
+
+bool Misc::recvWalletInfo(CMsgClientWalletInfoUpdate* body)
 {
-	switch(pkt->getProtoBufType())
+	const int32_t amount = g_config.fakeWalletBalance.get();
+	if (!amount || !body)
 	{
-		case k_EMsgClientPersonaState:
-		{
-			const auto name = g_config.fakeName.get();
-			if (name->size() < 1)
-			{
-				return;
-			}
+		return false;
+	}
 
-			auto msg = pkt->deserializeBody<CMsgClientPersonaState>();
+	body->set_has_wallet(true);
+	body->set_balance(amount);
+	body->set_balance64(amount);
+	return true;
+}
 
-			for (int i = 0; i < msg.friends_size(); i++)
-			{
-				auto frnd = msg.mutable_friends(i);
+bool Misc::recvEmailInfo(CMsgClientEmailAddrInfo* body)
+{
+	const auto email = g_config.fakeEmail.get();
+	if (email.size() < 1 || !body)
+	{
+		return false;
+	}
 
-				if (frnd->friendid() != g_currentSteamId.steamId64)
-				{
-					continue;
-				}
+	body->set_email_address(email);
+	body->set_email_is_validated(true);
+	return true;
+}
 
-				frnd->set_player_name(*name);
-				LOG_DEBUG("Faked self persona\n");
-
-				pkt->serialize(msg);
-				break;
-			}
-
+void Misc::recvMsg(CProtoBufMsgBase *msg)
+{
+	switch(msg->type)
+	{
+		case EMSG_WALLET_INFO_UPDATE:
+			recvWalletInfo(msg->getBody<CMsgClientWalletInfoUpdate>());
 			break;
-		}
 
-		case k_EMsgClientEmailAddrInfo:
-		{
-			const auto email = g_config.fakeEmail.get();
-			if (email->size() < 1)
-			{
-				return;
-			}
-
-			auto msg = pkt->deserializeBody<CMsgClientEmailAddrInfo>();
-			msg.set_email_address(*email);
-			msg.set_email_is_validated(true);
-
-			pkt->serialize(msg);
-			break;
-		}
-
-		case k_EMsgClientWalletInfoUpdate:
-		{
-			const int32_t amount = g_config.fakeWalletBalance.copy();
-			if (!amount)
-			{
-				return;
-			}
-
-			auto msg = pkt->deserializeBody<CMsgClientWalletInfoUpdate>();
-			msg.set_has_wallet(true);
-			msg.set_balance(amount);
-			msg.set_balance64(amount);
-
-			pkt->serialize(msg);
-			break;
-		}
-
-		default:
+		case EMSG_EMAIL_ADDRESS_INFO:
+			recvEmailInfo(msg->getBody<CMsgClientEmailAddrInfo>());
 			break;
 	}
 }

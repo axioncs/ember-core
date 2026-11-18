@@ -1,0 +1,69 @@
+
+
+#include "audit_symbols.hpp"
+
+#include <cstdio>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace
+{
+	int failures = 0;
+
+	void check(bool condition, const char* message)
+	{
+		if (!condition)
+		{
+			std::fprintf(stderr, "FAIL: %s\n", message);
+			++failures;
+		}
+	}
+}
+
+int main()
+{
+	using AuditBinding::Symbol;
+	const std::vector<std::pair<const char*, Symbol>> supported =
+	{
+		{"execv", Symbol::Execv},
+		{"execvp", Symbol::Execvp},
+		{"execve", Symbol::Execve},
+		{"execvpe", Symbol::Execvpe},
+		{"posix_spawn", Symbol::PosixSpawn},
+		{"posix_spawnp", Symbol::PosixSpawnp},
+		{"ember_local_stats_epoch_v1", Symbol::LocalStatsEpoch},
+	};
+
+	for (const auto& [name, expected] : supported)
+	{
+		check(AuditBinding::classify(name) == expected, name);
+	}
+
+	const std::vector<const char*> rejected =
+	{
+		nullptr,
+		"",
+		"exec",
+		"execvx",
+		"execV",
+		"posix_spawnx",
+		"spawn",
+		"eexecv",
+		"ember_local_stats_epoch_v2",
+		"ember_local_stats_epoch_v1_extra",
+	};
+	for (const char* name : rejected)
+	{
+		check(AuditBinding::classify(name) == Symbol::None,
+		      name == nullptr ? "null symbol" : name);
+	}
+
+	if (failures != 0)
+	{
+		std::fprintf(stderr, "test_audit_symbols: %d failure(s)\n", failures);
+		return 1;
+	}
+	std::puts("audit symbol tests passed");
+	return 0;
+}

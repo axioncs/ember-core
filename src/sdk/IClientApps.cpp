@@ -4,13 +4,13 @@
 #include "../vftableinfo.hpp"
 
 #include <cstdint>
+#include <limits>
 
-
-int32_t IClientApps::getAppData(const AppId_t appId, const char* name, const char* pChOut, steamsize_t outSize)
+int32_t IClientApps::getAppData(uint32_t appId, const char* name, const char* pChOut, uint32_t outSize)
 {
-	return MemHlp::callVFunc<uint32_t(*)(void*, AppId_t, const char*, const char*, steamsize_t)>
+	return MemHlp::callVFunc<uint32_t(*)(void*, uint32_t, const char*, const char*, uint32_t)>
 	(
-		 VFTIndexes::IClientApps::GetAppData.index,
+		 VFTIndexes::IClientApps::GetAppData,
 		 this,
 		 appId,
 		 name,
@@ -19,11 +19,11 @@ int32_t IClientApps::getAppData(const AppId_t appId, const char* name, const cha
 	);
 }
 
-uint32_t IClientApps::getAppDataSection(const AppId_t appId, const EAppInfoSection section, const char* pChOut, const steamsize_t outSize)
+uint32_t IClientApps::getAppDataSection(uint32_t appId, EAppInfoSection section, const char* pChOut, uint32_t outSize)
 {
-	return MemHlp::callVFunc<uint32_t(*)(void*, AppId_t, EAppInfoSection, const char*, steamsize_t, uint8_t)>
+	return MemHlp::callVFunc<uint32_t(*)(void*, uint32_t, uint32_t, const char*, uint32_t, uint8_t)>
 	(
-		 VFTIndexes::IClientApps::GetAppDataSection.index,
+		 VFTIndexes::IClientApps::GetAppDataSection,
 		 this,
 		 appId,
 		 section,
@@ -33,18 +33,24 @@ uint32_t IClientApps::getAppDataSection(const AppId_t appId, const EAppInfoSecti
 	);
 }
 
-bool IClientApps::requestAppInfoUpdate(const AppId_t* appIds, const steamsize_t numAppIds)
+bool IClientApps::requestAppInfoUpdate(const std::vector<uint32_t>& appIds)
 {
-	return MemHlp::callVFunc<bool(*)(void*, const AppId_t*, steamsize_t)>
-	(
-		VFTIndexes::IClientApps::RequestAppInfoUpdate.index,
-		this,
-		appIds,
-		numAppIds
-	);
+	if (appIds.empty() ||
+		appIds.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+	{
+		return false;
+	}
+	return MemHlp::callVFunc<
+		bool(*)(void*, const uint32_t*, int)>(
+			VFTIndexes::IClientApps::RequestAppInfoUpdate,
+			this,
+			appIds.data(),
+			static_cast<int>(appIds.size()));
 }
 
-EAppType IClientApps::getAppType(const AppId_t appId)
+EAppType IClientApps::getAppType(uint32_t appId)
 {
-	return MemHlp::callVFunc<EAppType(*)(void*, AppId_t)>(VFTIndexes::IClientApps::GetAppType.index, this, appId);
+	return MemHlp::callVFunc<EAppType(*)(void*, uint32_t)>(VFTIndexes::IClientApps::GetAppType, this, appId);
 }
+
+IClientApps* g_pClientApps;

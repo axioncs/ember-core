@@ -1,199 +1,171 @@
 #include "filewatcher.hpp"
 
-#include "log.hpp"
+#include "filewatcher_burst.hpp"
 
-#include <cstring>
-#include <filesystem>
-#include <linux/limits.h>
-#include <signal.h>
+#include "log.hpp"
+#include "ownerwork.hpp"
+
+#include <atomic>
+#include <cstdlib>
+#include <mutex>
+#include <poll.h>
 #include <sys/inotify.h>
-#include <sys/types.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
-
-void* CFileWatcher::watchLoop(void* args)
+namespace
 {
-	constexpr unsigned int BUF_LEN = (10 * (sizeof(struct inotify_event) + NAME_MAX + 1));
-	char buf[BUF_LEN] __attribute__ ((aligned(8)));
-	char* p;
-	inotify_event* event;
-	ssize_t size;
 
-	auto watcher = reinterpret_cast<CFileWatcher*>(args);
-	LOG_DEBUG("Started FileWatcher %u\n", watcher->notifyFd);
-
-	while (watcher->running)
+	uint32_t maskForPath(const char* path)
 	{
-		size = read(watcher->notifyFd, buf, sizeof(buf));
-
-		if (!size)
+		struct stat st{};
+		if (stat(path, &st) == 0 && S_ISDIR(st.st_mode))
 		{
-			LOG_ERROR("Failed to read from FileWatcher %i! (size = 0)\n", watcher->notifyFd);
-			break;
+			return IN_CREATE | IN_DELETE | IN_MOVED_TO | IN_MOVED_FROM
+			     | IN_CLOSE_WRITE;
 		}
-
-		if (size == -1)
-		{
-			if (errno == EINTR)
-			{
-				LOG_DEBUG("Filewatcher %u got interrupted!\n", watcher->notifyFd);
-				continue;
-			}
-
-			LOG_ERROR("Failed to read from FileWatcher %i (%s)!\n", watcher->notifyFd, strerror(errno));
-			break;
-		}
-
-		for (p = buf; p < buf + size; )
-		{
-			event = reinterpret_cast<inotify_event*>(p);
-			p += sizeof(inotify_event) + event->len;
-
-			auto path = watcher->fileFdMap[event->wd];
-			const bool isDir = std::filesystem::is_directory(path);
-			
-			if (!(event->mask & watcher->eventMask))
-			{
-				continue;
-			}
-
-			if (!isDir && strcmp(event->name, path.filename().c_str()) != 0)
-			{
-				continue;
-			}
-
-			LOG_DEBUG("inotify %s(%u) -> %u : %s\n", path.filename().c_str(), event->wd, event->mask, event->len ? event->name : "none");
-
-			if (isDir)
-			{
-				path.append(event->name);
-			}
-
-			watcher->onModify(path, event->mask);
-		}
+		return IN_MODIFY;
 	}
 
-	LOG_DEBUG("Watchthread for %i stopped\n", watcher->notifyFd);
+	std::atomic<bool>       g_watcherStopping{false};
+	std::mutex              g_watcherThreadsMu;
+	std::vector<pthread_t>  g_watcherThreads;
+	std::once_flag          g_watcherAtexitOnce;
+}
+
+void* watchLoop(void* args)
+{
+	auto watcher = reinterpret_cast<CFileWatcher*>(args);
+	g_pLog->debug("Started FileWatcher %u\n", watcher->notifyFd);
+
+	for(;;)
+	{
+
+		if (g_watcherStopping.load(std::memory_order_relaxed))
+		{
+			return nullptr;
+		}
+
+		g_pLog->debug("Watching for changes...\n");
+
+		struct pollfd pfd{};
+		pfd.fd = watcher->notifyFd;
+		pfd.events = POLLIN;
+		const int ready = poll(&pfd, 1, OwnerWork::kIdleTickMs);
+		if (ready <= 0 || (pfd.revents & POLLIN) == 0)
+		{
+
+			OwnerWork::idleTick();
+			continue;
+		}
+
+		alignas(inotify_event) char buf[4096];
+		ssize_t size = read(watcher->notifyFd, buf, sizeof(buf));
+		if (size <= 0)
+		{
+			continue;
+		}
+		size += static_cast<ssize_t>(
+			FileWatcherBurst::drainAdditionalReadable(watcher->notifyFd));
+
+		if (g_watcherStopping.load(std::memory_order_relaxed))
+		{
+			return nullptr;
+		}
+
+		g_pLog->debug("inotify batch bytes=%zd\n", size);
+
+		watcher->rearm();
+
+		watcher->onModify();
+	}
+
 	return nullptr;
 }
 
-void CFileWatcher::installSigHandler()
-{
-	//Purely exists to allow us to cancel the blocking read
-	struct sigaction sigAction { };
-	sigemptyset(&sigAction.sa_mask);
-
-	sigAction.sa_flags = SA_INTERRUPT;
-	sigAction.sa_handler = [](int sig)
-	{
-		LOG_DEBUG("Caught sig %i\n", sig);
-	};
-
-	sigaction(INTERRUPT_SIG, &sigAction, nullptr);
-	LOG_DEBUG("Installed sighandler\n");
-}
-
-CFileWatcher::CFileWatcher(const FileModifyEvent_t onModify, const int eventMask)
+CFileWatcher::CFileWatcher(FileModifyEvent_t onModify)
 {
 	this->onModify = onModify;
-	this->eventMask = eventMask;
 
 	notifyFd = inotify_init();
-	LOG_DEBUG("Created notify fd %i\n", notifyFd);
+	g_pLog->debug("Created notify fd %i\n", notifyFd);
 }
 
 CFileWatcher::~CFileWatcher()
 {
-	stop();
-
-	if (notifyFd != -1 && close(notifyFd) == -1)
+	if (watchThread)
 	{
-		LOG_ERROR("Failed to close notifyFd %i!\n", notifyFd);
+		stop();
+	}
+
+	if (notifyFd != -1)
+	{
+		close(notifyFd);
 	}
 }
 
-int CFileWatcher::addFile(const std::filesystem::path& path)
+bool CFileWatcher::addFile(const char* path)
 {
-	//Watching seperate files does not seem to work very well, since the file descriptor becomes useless
-	//on some operations
-	
-	for (const auto& fd : fileFdMap)
-	{
-		if (fd.second == path)
-		{
-			return 0;
-		}
-	}
-
-	int fd;
-
-	if (std::filesystem::is_directory(path))
-	{
-		fd = inotify_add_watch(notifyFd, path.c_str(), eventMask);
-		LOG_DEBUG("Adding %s to FileWatcher %i\n", path.filename().c_str(), notifyFd);
-	}
-	else
-	{
-		fd = inotify_add_watch(notifyFd, path.parent_path().c_str(), eventMask);
-		LOG_DEBUG("Adding %s with file %s to FileWatcher %i\n", path.parent_path().filename().c_str(), path.filename().c_str(), notifyFd);
-	}
-
+	int fd = inotify_add_watch(notifyFd, path, maskForPath(path));
 	if (fd == -1)
 	{
-		LOG_ERROR("Failed to watch %s!\n", path.filename().c_str());
-		return fd;
+		return false;
 	}
 
+	watchedPaths.emplace_back(path);
 	fileFdMap[fd] = path;
-	return fd;
+	g_pLog->debug("Added %s to FileWatcher %i\n", path, notifyFd);
+	return true;
 }
 
-bool CFileWatcher::removeFile(const std::filesystem::path& path)
+void CFileWatcher::rearm()
 {
-	for (const auto& fd : fileFdMap)
+	for (const auto& path : watchedPaths)
 	{
-		if (fd.second == path)
+		int fd = inotify_add_watch(notifyFd, path.c_str(), maskForPath(path.c_str()));
+		if (fd != -1)
 		{
-			inotify_rm_watch(fd.first, notifyFd);
-			return true;
+			fileFdMap[fd] = path;
 		}
 	}
-
-	LOG_WARN("Tried to remove non-existent inotify wathc for %s!\n", path.filename().c_str());
-	return false;
 }
 
 bool CFileWatcher::start()
 {
-	try
+	int code = pthread_create(&watchThread, nullptr, &watchLoop, this);
+	if (code != 0)
 	{
-		running = true;
-		watchThread = std::thread(&watchLoop, this);
-	}
-	catch (...)
-	{
-		running = false;
-		LOG_ERROR("Failed to start watchThread!\n");
+		return false;
 	}
 
-	return running;
+	{
+		std::lock_guard<std::mutex> lock(g_watcherThreadsMu);
+		g_watcherThreads.push_back(watchThread);
+	}
+	std::call_once(g_watcherAtexitOnce, []
+	{
+		std::atexit(&CFileWatcher::stopAllForShutdown);
+	});
+	return true;
 }
 
 void CFileWatcher::stop()
 {
-	if (!running)
+	pthread_cancel(watchThread);
+}
+
+void CFileWatcher::stopAllForShutdown()
+{
+	g_watcherStopping.store(true, std::memory_order_relaxed);
+
+	std::vector<pthread_t> threads;
 	{
-		return;
+		std::lock_guard<std::mutex> lock(g_watcherThreadsMu);
+		threads.swap(g_watcherThreads);
 	}
 
-	running = false;
-	pthread_kill(watchThread.native_handle(), INTERRUPT_SIG);
-
-	try
+	for (const pthread_t thread : threads)
 	{
-		watchThread.join();
-	}
-	catch (...)
-	{
+		pthread_join(thread, nullptr);
 	}
 }

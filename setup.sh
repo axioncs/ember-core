@@ -1,191 +1,1480 @@
 #!/bin/bash
 
-SLSDIR="$HOME/.local/share/SLSsteam"
-SLSPATH="$SLSDIR/path"
-SLSLIB="$SLSDIR/SLSsteam.so"
-SLSAUDIT="LD_AUDIT=\"$SLSDIR/SLSsteam.so\""
+EMBERDIR="$HOME/.local/share/ember"
+EMBERLIB="$EMBERDIR/ember-core.so"
+OS_RELEASE_FILE="${OS_RELEASE_FILE:-/etc/os-release}"
 
-FLATPAK_APP_ID="com.valvesoftware.Steam"
-FLATPAK_SLSDIR="$HOME/.var/app/$FLATPAK_APP_ID/.local/share/SLSsteam"
-FLATPAK_LD_AUDIT="/app/links/\$LIB/libshared-library-guard.so:$FLATPAK_SLSDIR/SLSsteam.so"
+# User-local applications dir (XDG override always wins over system-wide).
+USER_APPS="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+USER_DESKTOP="$USER_APPS/steam.desktop"
+SYS_DESKTOP="/usr/share/applications/steam.desktop"
 
-uninstall()
-{
-	test -f "$SLSDIR/steam-jupiter.bak" && sudo cp -v "$SLSDIR/steam-jupiter.bak" "$(realpath "$(type -P steam-jupiter)")" #Left over from Steam Deck patcher
-	rm -v "$HOME/.config/fish/SLSsteam.fish" 2> /dev/null
-	rm -v "$HOME/.local/share/applications/steam.desktop" 2> /dev/null
-	rm -v "$HOME/.local/share/applications/steam-native.desktop" 2> /dev/null
-	rm -rvf "$SLSDIR"
-	echo "Uninstall done!"
-}
+# XDG autostart: some images (SteamOS/Bazzite) auto-launch Steam on desktop
+# login via /etc/xdg/autostart/steam.desktop (which calls the distro launcher,
+# bypassing our wrapper). A user-level entry of the same basename overrides it.
+USER_AUTOSTART="${XDG_CONFIG_HOME:-$HOME/.config}/autostart/steam.desktop"
+SYS_AUTOSTART="/etc/xdg/autostart/steam.desktop"
 
-uninstall_flatpak()
-{
-	if ! type -P flatpak > /dev/null; then
-		echo "Flatpak not found! Skipping flatpak uninstall"
-		return 1
+# Tag we drop into patched .desktop files so we can detect/undo them later.
+EMBER_TAG="X-Ember-Patched=true"
+
+# Desktop-coverage logic (scan + patch every *steam*.desktop, blindagens,
+# restore) lives in one sourceable lib shared with the wrapper and Lumen. Source
+# the in-repo copy at install time so dc_run / dc_restore_all are available here.
+WRAPPER="$EMBERDIR/path/steam"
+DC_TAG="$EMBER_TAG"
+DC_BACKUP_ROOT="$EMBERDIR/backup"
+SETUP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SETUP_DIR/tools/desktop-coverage.lib.sh" ]; then
+	# shellcheck source=/dev/null
+	. "$SETUP_DIR/tools/desktop-coverage.lib.sh"
+fi
+if [ -f "$SETUP_DIR/tools/launcher-shim.lib.sh" ]; then
+	# shellcheck source=/dev/null
+	. "$SETUP_DIR/tools/launcher-shim.lib.sh"
+fi
+if [ -f "$SETUP_DIR/tools/desktop-guardian-units.lib.sh" ]; then
+	# shellcheck source=/dev/null
+	. "$SETUP_DIR/tools/desktop-guardian-units.lib.sh"
+fi
+
+# ============================================================================
+# Pretty output (colors + box-drawing). Falls back to plain text when stdout
+# is not a TTY or the terminal does not advertise colour support.
+#
+# Palette: "moonlit night" — cool blues for structure, silver-white for the
+# moon glyph, standard semantic colours for status. Uses 256-colour escapes
+# when the terminal supports them, otherwise degrades to 8-colour ANSI.
+# ============================================================================
+
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != "dumb" ]; then
+	# Detect 256-colour support. tput is the reliable check; default to true
+	# if tput is unavailable but COLORTERM looks modern.
+	if command -v tput >/dev/null 2>&1 && [ "$(tput colors 2>/dev/null || echo 0)" -ge 256 ]; then
+		HAS_256=1
+	elif [ "${COLORTERM:-}" = "truecolor" ] || [ "${COLORTERM:-}" = "24bit" ]; then
+		HAS_256=1
+	else
+		HAS_256=0
 	fi
 
-	flatpak override --user --unset-env=LD_AUDIT --unset-env=SHARED_LIBRARY_GUARD "$FLATPAK_APP_ID" 2> /dev/null
-	rm -rvf "$FLATPAK_SLSDIR"
+	BOLD=$'\033[1m'
+	DIM=$'\033[2m'
+	NC=$'\033[0m'
 
-	echo "Flatpak uninstall done!"
+	if [ "$HAS_256" = 1 ]; then
+		MOON=$'\033[38;5;153m'
+		NIGHT=$'\033[38;5;75m'
+		HALO=$'\033[38;5;231m'
+		MUTED=$'\033[38;5;110m'
+		GREEN=$'\033[38;5;114m'
+		YELLOW=$'\033[38;5;221m'
+		RED=$'\033[38;5;203m'
+	else
+		MOON=$'\033[1;34m'
+		NIGHT=$'\033[0;36m'
+		HALO=$'\033[1;37m'
+		MUTED=$'\033[0;34m'
+		GREEN=$'\033[0;32m'
+		YELLOW=$'\033[0;33m'
+		RED=$'\033[0;31m'
+	fi
+else
+	BOLD=""; DIM=""; NC=""
+	MOON=""; NIGHT=""; HALO=""; MUTED=""
+	GREEN=""; YELLOW=""; RED=""
+fi
+
+print_banner() {
+	echo ""
+	echo -e "${MOON}${BOLD}"
+	echo "┌─────────────────────────────────────────────────────────┐"
+	printf "│             ${HALO}${BOLD}◯${NC}${MOON}${BOLD}  ember installer                   │\n"
+	echo "└─────────────────────────────────────────────────────────┘"
+	echo -e "${NC}"
 }
 
-install_wrapper()
-{
-	EXE="$1"
-	FPATH="$(type -P $EXE)"
+print_section() {
+	echo ""
+	echo -e "${NIGHT}─────────────────────────────────────────────────────────${NC}"
+	echo -e "${NIGHT}${BOLD}❯ $1${NC}"
+	echo -e "${NIGHT}─────────────────────────────────────────────────────────${NC}"
+}
 
-	if [[ $? -ne 0 ]]; then
-		echo "$EXE not found in path! Skipping"
-		return 1
+log_info()    { echo -e "${NIGHT}→${NC} $1"; }
+log_success() { echo -e "${GREEN}✓${NC} $1"; }
+log_warn()    { echo -e "${YELLOW}⚠${NC} $1"; }
+log_error()   { echo -e "${RED}✗${NC} $1"; }
+log_step()    { echo -e "${MOON}•${NC} $1"; }
+
+print_install_complete() {
+	echo ""
+	echo -e "${GREEN}${BOLD}"
+	echo "┌─────────────────────────────────────────────────────────┐"
+	echo "│        ✓ ember Installation Completed!           │"
+	echo "└─────────────────────────────────────────────────────────┘"
+	echo -e "${NC}"
+}
+
+print_uninstall_complete() {
+	echo ""
+	echo -e "${GREEN}${BOLD}"
+	echo "┌─────────────────────────────────────────────────────────┐"
+	echo "│               ✓ Uninstall Complete!                     │"
+	echo "└─────────────────────────────────────────────────────────┘"
+	echo -e "${NC}"
+	echo ""
+	echo -e "   Restart your terminal and Steam for changes to take effect."
+	echo ""
+}
+
+# ============================================================================
+# Detection helpers
+# ============================================================================
+
+# True on immutable / atomic systems (Bazzite, SteamOS, Fedora Atomic/ublue, …)
+# where /usr is read-only: we must NOT attempt the system-wide .desktop patch
+# (it would prompt for sudo then fail silently). User-level entries override the
+# system ones via XDG precedence, so --user fully covers the normal launchers.
+is_immutable_distro() {
+	case "${EMBER_IMMUTABLE:-}" in
+		1|yes|true) return 0 ;;
+		0|no|false) return 1 ;;
+	esac
+
+	local id="" like="" variant=""
+	if [ -r "$OS_RELEASE_FILE" ]; then
+		id="$(
+			# shellcheck disable=SC1090
+			. "$OS_RELEASE_FILE" >/dev/null 2>&1
+			printf '%s' "${ID:-}"
+		)"
+		like="$(
+			# shellcheck disable=SC1090
+			. "$OS_RELEASE_FILE" >/dev/null 2>&1
+			printf '%s' "${ID_LIKE:-}"
+		)"
+		variant="$(
+			# shellcheck disable=SC1090
+			. "$OS_RELEASE_FILE" >/dev/null 2>&1
+			printf '%s' "${VARIANT_ID:-}"
+		)"
 	fi
+	id="${id,,}"; like="${like,,}"; variant="${variant,,}"
+	case " $id $like " in
+		*" bazzite "*|*" steamos "*|*" steamdeck "*|*" holoiso "*|\
+		*" silverblue "*|*" kinoite "*|*" sericea "*|*" onyx "*|\
+		*" bluefin "*|*" aurora "*|*" ucore "*) return 0 ;;
+	esac
+	case "$variant" in silverblue|kinoite|sericea|onyx|*atomic*) return 0 ;; esac
+	command -v rpm-ostree >/dev/null 2>&1 && return 0
+	command -v steamos-readonly >/dev/null 2>&1 && return 0
+	if command -v findmnt >/dev/null 2>&1; then
+		case ",$(findmnt -no OPTIONS / 2>/dev/null)," in *,ro,*) return 0 ;; esac
+	fi
+	return 1
+}
 
-	DIRNAME="$(dirname "$FPATH")"
-	if [ "$DIRNAME" = "$SLSPATH" ]; then
-		echo "$EXE wrapper already installed! Skipping"
+# Find the real Steam binary. Distros vary:
+#   /usr/games/steam        Debian, Ubuntu, Mint (steam-installer)
+#   /usr/bin/steam          Arch, Fedora, openSUSE, Manjaro, Pop!_OS
+#   /usr/local/bin/steam    manual installs
+detect_steam_binary() {
+	local c
+	for c in /usr/games/steam /usr/bin/steam /usr/local/bin/steam; do
+		if [ -x "$c" ]; then
+			echo "$c"
+			return 0
+		fi
+	done
+	command -v steam 2>/dev/null
+}
+
+# Tell the Mint/Debian "steam-installer" stub apart from a real Steam launcher.
+# The stub has Name=Install Steam.
+is_real_steam_desktop() {
+	local f="$1"
+	[ -f "$f" ] || return 1
+	# Already patched by us — treat as real (don't recurse).
+	grep -q "$EMBER_TAG" "$f" 2>/dev/null && return 0
+	# Stub installer, skip it.
+	grep -q "^Name=Install Steam" "$f" 2>/dev/null && return 1
+	# Heuristic: any Exec= line that runs steam directly.
+	grep -qE "^Exec=.*((^| |\")steam( |\$|%)|/steam( |\$|%)|/games/steam|/bin/steam)" "$f" 2>/dev/null
+}
+
+# Already patched to use our wrapper?
+is_patched_desktop() {
+	[ -f "$1" ] && grep -q "$EMBER_TAG" "$1" 2>/dev/null
+}
+
+# Locate a "donor" .desktop to seed the user-local override from when the user
+# doesn't already have one. Tries, in order: existing user-local (real), the
+# system-wide entry (real), and the bundle Steam itself ships under
+# ~/.steam/.../steam-launcher/.
+find_donor_desktop() {
+	local c
+	if is_real_steam_desktop "$USER_DESKTOP"; then
+		echo "$USER_DESKTOP"; return 0
+	fi
+	if is_real_steam_desktop "$SYS_DESKTOP"; then
+		echo "$SYS_DESKTOP"; return 0
+	fi
+	for c in \
+		"$HOME/.steam/steam/steam-launcher/steam.desktop" \
+		"$HOME/.steam/debian-installation/deb-installer/steam-launcher/steam.desktop" \
+		"$HOME/.steam/debian-installation/deb-installer/steam.desktop"; do
+		if is_real_steam_desktop "$c"; then
+			echo "$c"; return 0
+		fi
+	done
+	return 1
+}
+
+# ============================================================================
+# Steam process management
+# ============================================================================
+
+# Stop any running Steam so the wrapper / desktop entry takes effect on next
+# launch. Tries graceful shutdown first, falls back to SIGTERM then SIGKILL.
+kill_steam() {
+	if ! pgrep -x steam >/dev/null 2>&1 \
+	   && ! pgrep -f '/steam$|/steam ' >/dev/null 2>&1 \
+	   && ! pgrep -f 'steamwebhelper' >/dev/null 2>&1; then
+		log_success "No running Steam process detected"
 		return 0
 	fi
 
-	echo -e "#!/bin/sh\n$SLSAUDIT \"$FPATH\"" > "$SLSPATH/$EXE" '$@'
+	log_info "Stopping running Steam processes"
 
-	chmod u+x "$SLSPATH/$EXE"
-
-	echo "Created wrapper for $FPATH at $SLSPATH/$EXE"
-	return 0
-}
-
-install_desktop_file()
-{
-	NAME="$1.desktop"
-	USR_APP_DIR="$HOME/.local/share/applications"
-	APP_DIR="/usr/share/applications"
-
-	#All these error checks are borderline insane, but I won't assume anything anymore.
-	if [ ! -f "$APP_DIR/$NAME" ]; then
-		echo "$NAME not found in applications! Skipping"
-		return 1
+	if command -v steam >/dev/null 2>&1; then
+		# Sandboxed launchers replicate the caller's cwd inside their sandbox.
+		# The installer may still be inside a temporary extraction directory,
+		# which does not exist in that sandbox. Keep the shutdown request local
+		# to this subshell so setup.sh itself retains its current directory.
+		(
+			cd "$HOME" 2>/dev/null || cd / 2>/dev/null || exit 0
+			steam -shutdown >/dev/null 2>&1
+		) || true
 	fi
 
-	if [ ! -d "$USR_APP_DIR" ]; then
-		mkdir "$USR_APP_DIR"
-		if [[ $? -ne 0 ]]; then
-			echo "Failed to create $USR_APP_DIR! Aborting .desktop creation"
-			return 1
+	for _ in 1 2 3 4 5; do
+		if ! pgrep -x steam >/dev/null 2>&1 \
+		   && ! pgrep -f 'steamwebhelper' >/dev/null 2>&1; then
+			log_success "Steam stopped"
+			return 0
 		fi
+		sleep 1
+	done
+
+	pkill -TERM -x steam 2>/dev/null || true
+	pkill -TERM -f 'steamwebhelper' 2>/dev/null || true
+	pkill -TERM -f '/steam$|/steam ' 2>/dev/null || true
+	sleep 2
+
+	if pgrep -x steam >/dev/null 2>&1 \
+	   || pgrep -f 'steamwebhelper' >/dev/null 2>&1 \
+	   || pgrep -f '/steam$|/steam ' >/dev/null 2>&1; then
+		log_warn "Steam still running — sending SIGKILL"
+		pkill -KILL -x steam 2>/dev/null || true
+		pkill -KILL -f 'steamwebhelper' 2>/dev/null || true
+		pkill -KILL -f '/steam$|/steam ' 2>/dev/null || true
+		sleep 1
 	fi
 
-	cp "$APP_DIR/$NAME" "$USR_APP_DIR/"
-	sed -i "s|^Exec=/|Exec=env $SLSAUDIT /|" "$USR_APP_DIR/$NAME"
-
-	echo "Created $USR_APP_DIR/$NAME"
+	log_success "Steam stopped"
 }
 
-install_path()
+# ============================================================================
+# Install steps
+# ============================================================================
+
+install_ember()
 {
-	SHELLPATH="$(realpath "$SHELL")"
-	CMD="$(echo "export PATH=\"$SLSPATH:\$PATH\"")"
+	LIB="./bin/ember-core.so"
 
-	if [ "$SHELLPATH" = "/usr/bin/fish" ]; then
-		SLSSTEAM_FISH="$HOME/.config/fish/conf.d/SLSsteam.fish"
-		if [ ! -f "$SLSSTEAM_FISH" ]; then
-			echo "$CMD" > "$SLSSTEAM_FISH"
-			echo "Wrote $CMD to $SLSSTEAM_FISH"
-
-			echo "Relog for changes to take effect!"
-		fi
-	else
-		echo "User is on unsupported shell! Skipping path installation"
-		return 1
-	fi
-
-	return 0
-}
-
-install_slssteam()
-{
-	LIB="./bin/SLSsteam.so"
 	if [ ! -f "$LIB" ]; then
-		echo "bin/SLSsteam.so not found! Did you run the install.sh in the correct directory?"
+		log_error "$LIB not found"
+		echo ""
+		echo "   If you're a developer, build it first:"
+		echo -e "     ${GREEN}./build-docker.sh${NC}  ${MUTED}# For releases (requires Podman/Docker)${NC}"
+		echo -e "     ${GREEN}make${NC}               ${MUTED}# For local testing${NC}"
+		echo ""
 		exit 1
 	fi
 
-	if [ ! -d "$SLSDIR" ]; then
-		#Not using -p flag because it will silence errors
-		#Although I don't think there's anyone that doesn't have a ~/.local/share directory
-		mkdir "$SLSDIR"
-		if [[ $? -ne 0 ]]; then
-			echo "Unable to create $SLSDIR! Aborting"
-			exit 1
-		fi
+	log_info "Installing ember libraries"
+	mkdir -p "$EMBERDIR" || exit 1
+	cp -v ./bin/* "$EMBERDIR/" | sed "s|^|   ${MUTED}${NC}|"
+	# Desktop-coverage helper (scan + patch all *steam*.desktop). Shipped in the
+	# release; copied next to the wrapper so the wrapper and Lumen can invoke it.
+	install -m 0644 ./tools/desktop-coverage.lib.sh "$EMBERDIR/desktop-coverage.lib.sh" 2>/dev/null || \
+		cp ./tools/desktop-coverage.lib.sh "$EMBERDIR/desktop-coverage.lib.sh"
+	install -m 0644 ./tools/launcher-shim.lib.sh "$EMBERDIR/launcher-shim.lib.sh" 2>/dev/null || \
+		cp ./tools/launcher-shim.lib.sh "$EMBERDIR/launcher-shim.lib.sh"
+	install -m 0644 ./tools/desktop-guardian-units.lib.sh "$EMBERDIR/desktop-guardian-units.lib.sh" 2>/dev/null || \
+		cp ./tools/desktop-guardian-units.lib.sh "$EMBERDIR/desktop-guardian-units.lib.sh"
+	install -m 0755 ./ensure-desktop-coverage.sh    "$EMBERDIR/ensure-desktop-coverage.sh" 2>/dev/null || \
+		{ cp ./ensure-desktop-coverage.sh "$EMBERDIR/ensure-desktop-coverage.sh"; chmod +x "$EMBERDIR/ensure-desktop-coverage.sh"; }
+	# Payload auto-updater. Runs detached from the wrapper; it only swaps the
+	# three libs above when a newer release exists, so keep it next to them.
+	install -m 0755 ./tools/ember-autoupdate.sh "$EMBERDIR/ember-autoupdate.sh" 2>/dev/null || \
+		{ cp ./tools/ember-autoupdate.sh "$EMBERDIR/ember-autoupdate.sh"; chmod +x "$EMBERDIR/ember-autoupdate.sh"; }
+	# Which release this payload came from. The updater only touches an install
+	# it can identify (a hand-built payload has no version file and is left
+	# alone), so a release zip has to carry its own tag.
+	if [ -r ./res/release-version.txt ]; then
+		tr -d '[:space:]' < ./res/release-version.txt > "$EMBERDIR/version"
 	fi
-
-	if [ ! -d "$SLSPATH" ]; then #This whole fucking block should be unnecessary. Well, better safe than sorry. Thanks Valve for the Deck
-		mkdir "$SLSPATH"
-
-		if [[ $? -ne 0 ]]; then
-			echo "Unable to create $SLSPATH! Aborting"
-			exit 1
-		fi
-	fi
-
-	cp -v ./bin/* "$SLSDIR/"
+	log_success "Libraries installed at $EMBERDIR"
+	echo ""
 }
 
-install_flatpak()
+create_steam_wrapper()
 {
-	if [ ! -f "./bin/SLSsteam.so" ]; then
-		echo "bin/SLSsteam.so not found! Did you run the install.sh in the correct directory?"
+	log_info "Creating Steam wrapper with ember injection"
+
+	mkdir -p "$EMBERDIR/path"
+
+	# The wrapper resolves the real Steam binary at runtime so the install is
+	# portable across distros (and survives moves between, e.g., a Debian-style
+	# /usr/games/steam and an Arch-style /usr/bin/steam).
+	cat > "$EMBERDIR/path/steam" << 'EOF'
+#!/bin/sh
+# ember wrapper. Injects ember via LD_AUDIT (rtld-audit) so the audit
+# namespace can't interpose on Steam's own copies of protobuf / yaml-cpp /
+# libstdc++. ember-library-inject.so redirects libcurl to the system copy and must
+# come first. CloudRedirect (cloud saves) is injected separately via LD_PRELOAD
+# (see its block below).
+EMBERDIR="$HOME/.local/share/ember"
+
+# Desktop entries from older installs may invoke this wrapper with our audit
+# DSOs already present in LD_AUDIT.  Remove only our known objects immediately,
+# before helper commands (readlink, stat, awk, …) are spawned.  An inherited
+# third-party auditor is preserved and is reattached after the guard has made
+# its decision.
+ember_strip_own_auditors() {
+	_ember_old_ifs="$IFS"
+	IFS=:
+	_ember_clean=""
+	for _ember_audit in ${LD_AUDIT:-}; do
+		case "$_ember_audit" in
+			''|*ember-core.so|*ember-library-inject.so|*libember-core.so|*libember-ember-library-inject.so)
+				continue ;;
+			*)
+				_ember_clean="${_ember_clean:+$_ember_clean:}$_ember_audit" ;;
+		esac
+	done
+	IFS="$_ember_old_ifs"
+	printf '%s' "$_ember_clean"
+}
+EMBER_INHERITED_AUDIT="$(ember_strip_own_auditors)"
+if [ -n "$EMBER_INHERITED_AUDIT" ]; then
+	export LD_AUDIT="$EMBER_INHERITED_AUDIT"
+else
+	unset LD_AUDIT
+fi
+
+# Resolve the real Steam binary, skipping our own wrapper.
+SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+STEAM_BIN=""
+EMBER_EXPLICIT_STEAM_BIN=0
+# A retained mirrored backup can itself be a managed shim after an interrupted
+# restore. Never let an explicit hook promote that shim back into the launch
+# chain; resolve a vanilla Steam path instead.
+if [ -n "${EMBER_STEAM_BIN:-}" ] && \
+   head -3 "$EMBER_STEAM_BIN" 2>/dev/null | \
+   grep -qF "ember system launcher shim"; then
+	unset EMBER_STEAM_BIN
+fi
+# Override hook: an explicit, executable path wins. Lets power users pin a
+# specific Steam binary and lets the wrapper guard's unit test inject a fake
+# Steam; a no-op when unset.
+if [ -n "${EMBER_STEAM_BIN:-}" ] && [ -x "${EMBER_STEAM_BIN:-}" ] && \
+   [ "$(readlink -f "$EMBER_STEAM_BIN" 2>/dev/null || echo "$EMBER_STEAM_BIN")" != "$SELF" ]; then
+	STEAM_BIN="$EMBER_STEAM_BIN"
+	EMBER_EXPLICIT_STEAM_BIN=1
+fi
+if [ -z "$STEAM_BIN" ]; then
+	for c in /usr/games/steam /usr/bin/steam /usr/local/bin/steam; do
+		if [ -x "$c" ] \
+			&& [ "$(readlink -f "$c" 2>/dev/null || echo "$c")" != "$SELF" ] \
+			&& ! head -3 "$c" 2>/dev/null | grep -q "ember system launcher shim"; then
+			STEAM_BIN="$c"
+			break
+		fi
+	done
+fi
+if [ -z "$STEAM_BIN" ]; then
+	# Fall back to PATH lookup, but skip ourselves.
+	IFS=:
+	for d in $PATH; do
+		c="$d/steam"
+		if [ -x "$c" ] \
+			&& [ "$(readlink -f "$c" 2>/dev/null || echo "$c")" != "$SELF" ] \
+			&& ! head -3 "$c" 2>/dev/null | grep -q "ember system launcher shim"; then
+			STEAM_BIN="$c"
+			break
+		fi
+	done
+	unset IFS
+fi
+# All system launchers are our shims or absent.  Fall back to the
+# steam.sh script inside the Steam data directory (it is what the
+# system launcher would exec anyway once the bootstrap is set up).
+if [ -z "$STEAM_BIN" ]; then
+	for c in "${HOME}/.local/share/Steam/steam.sh" \
+	         "${HOME}/.steam/steam/steam.sh" \
+	         "${HOME}/.steam/debian-installation/steam.sh"; do
+		if [ -x "$c" ]; then
+			STEAM_BIN="$c"
+			break
+		fi
+	done
+fi
+if [ -z "$STEAM_BIN" ]; then
+	echo "ember: could not find the real Steam binary" >&2
+	exit 127
+fi
+# Canonicalize relative paths before we touch cwd below. Absolute paths must
+# remain verbatim because the bootstrap guard below matches their managed
+# launcher prefixes literally.
+case "$STEAM_BIN" in
+	/*) ;;
+	*) STEAM_BIN="$(readlink -f "$STEAM_BIN" 2>/dev/null || echo "$STEAM_BIN")" ;;
+esac
+
+# Valve's distro launcher (bin_steam.sh, which /usr/bin/steam symlinks to on
+# Fedora/Nobara) takes its whole identity from its own argv[0]:
+#
+#     STEAMPACKAGE="${0##*/}" ... *) log "Unknown Steam package"; exit 1
+#
+# A captured original such as system-launcher-backup/usr/bin/steam.orig is
+# exactly that case, so exec'ing it aborts the launch before Steam opens its
+# logger: Steam silently never starts and no log is written anywhere. Never
+# exec a launcher under a name it can reject - route through a `steam`-named
+# alias for the same file. This also heals a shim written by an older release
+# that still hands over the `.orig` path directly.
+# EMBER_POLICY_BIN keeps the resolved path so the bootstrap guard below still
+# classifies the launcher by what was actually resolved, not by the alias.
+EMBER_POLICY_BIN="$STEAM_BIN"
+ember_launcher_name_safe() {
+	case "${1##*/}" in
+		steam|steambeta|bin_steam.sh|steam.sh) return 0 ;;
+	esac
+	return 1
+}
+ember_same_file() {
+	_ember_a="$(readlink -f "$1" 2>/dev/null || true)"
+	_ember_b="$(readlink -f "$2" 2>/dev/null || true)"
+	[ -n "$_ember_a" ] && [ "$_ember_a" = "$_ember_b" ]
+}
+ember_normalize_launcher() {
+	ember_launcher_name_safe "$STEAM_BIN" && return 0
+	# 1) The alias the installer keeps next to the captured original.
+	_ember_sibling="${STEAM_BIN%/*}/steam"
+	if [ -x "$_ember_sibling" ] && ember_same_file "$_ember_sibling" "$STEAM_BIN"; then
+		STEAM_BIN="$_ember_sibling"
+		return 0
+	fi
+	# 2) A private alias we own, created on demand.
+	_ember_alias_dir="$EMBERDIR/launcher-alias"
+	_ember_alias="$_ember_alias_dir/steam"
+	if mkdir -p "$_ember_alias_dir" 2>/dev/null; then
+		if ! ember_same_file "$_ember_alias" "$STEAM_BIN"; then
+			[ -L "$_ember_alias" ] || rm -f "$_ember_alias" 2>/dev/null || true
+			ln -sfn "$STEAM_BIN" "$_ember_alias" 2>/dev/null || true
+		fi
+		if [ -x "$_ember_alias" ] && ember_same_file "$_ember_alias" "$STEAM_BIN"; then
+			STEAM_BIN="$_ember_alias"
+			return 0
+		fi
+	fi
+	# 3) Nothing aliasable: the data-dir steam.sh ignores its own name.
+	for _ember_c in "${HOME}/.local/share/Steam/steam.sh" \
+	               "${HOME}/.steam/steam/steam.sh" \
+	               "${HOME}/.steam/debian-installation/steam.sh"; do
+		if [ -x "$_ember_c" ]; then
+			STEAM_BIN="$_ember_c"
+			return 0
+		fi
+	done
+	return 1
+}
+ember_normalize_launcher || true
+
+# Some Steam launchers (Nix's FHS/bwrap wrapper) replicate our cwd inside
+# their sandbox via --chdir. If we were started from a short-lived temp dir
+# (an installer extracting to $(mktemp -d) before running us), the sandbox's
+# isolated /tmp won't have it and bwrap fails to chdir. $HOME is always
+# there, so pin cwd to it now that STEAM_BIN is resolved.
+cd "$HOME" 2>/dev/null || cd / 2>/dev/null || true
+
+ember_exec_vanilla() {
+	# Safe mode must not depend on what a desktop entry or parent shell put in
+	# the loader environment.  Unset the complete loader surface, not only our
+	# own names, so a broken third-party preload cannot keep the recovery loop.
+	exec env -u LD_AUDIT -u LD_PRELOAD -u LD_LIBRARY_PATH "$STEAM_BIN" "$@"
+}
+
+# Debian's Install Steam package stub is a valid executable before the client
+# root exists, but it is not a Steam client and must never receive injection.
+# Explicit test/pinned binaries remain eligible; captured originals from our
+# system-launcher backup are shim-originated and still require bootstrap.
+ember_bootstrap_guard() {
+	if [ "${EMBER_EXPLICIT_STEAM_BIN:-0}" = 1 ]; then
+		case "$EMBER_POLICY_BIN" in
+			"$EMBERDIR/system-launcher-backup/"*) ;;
+			*) return 0 ;;
+		esac
+	else
+		case "$EMBER_POLICY_BIN" in
+			/usr/games/steam|/usr/bin/steam|/usr/local/bin/steam) ;;
+			*) return 0 ;;
+		esac
+	fi
+	[ -L "$HOME/.steam/steam" ] || return 1
+	_ember_bootstrap_root="$(readlink -e "$HOME/.steam/steam" 2>/dev/null || true)"
+	[ -n "$_ember_bootstrap_root" ] || return 1
+	[ -f "$_ember_bootstrap_root/steam.sh" ] && \
+		[ -x "$_ember_bootstrap_root/steam.sh" ]
+}
+if ! ember_bootstrap_guard; then
+	ember_exec_vanilla "$@"
+fi
+
+# ---------------------------------------------------------------------------
+# Crash-loop fail-safe (Game Mode boot protection).
+#
+# In a gamescope "Game Mode" session the supervisor relaunches Steam every time
+# it exits. If our injected stack (ember via LD_AUDIT / CloudRedirect via
+# LD_PRELOAD / the Lumen sidecar) goes incompatible with a freshly-updated Steam
+# client and stalls the engine, the device loops on the splash forever and the
+# user can never reach Desktop Mode to update. This guard counts boots that
+# CRASHED AT STARTUP (Steam wrote an assert/crash minidump within the boot's
+# first few minutes) and, past a threshold, LATCHES into a safe mode that starts
+# Steam completely vanilla (no LD_AUDIT, no LD_PRELOAD, no sidecar) so the
+# session comes up. The latch is scoped to THAT SESSION: a relaunch loop lives
+# entirely inside one boot, so a boot is all the time pausing injection needs to
+# cover, and every new session re-arms it. (A latch that outlived the boot left
+# the user on a silently unhooked Steam - no plugin UI, no explanation - that
+# only a payload reinstall could undo.) We deliberately key off the crash dump
+# and NOT merely a short-lived session: switching Game Mode <-> Desktop, a client
+# self-update restart, or a quick manual quit all end Steam fast but are NOT
+# failures, and a clean kill never writes a dump. As a fast path, a startup crash whose
+# steamclient.so differs from the last cleanly-booted one latches on the FIRST
+# crash (a fresh client is the near-certain cause), so the user is not made to
+# loop MAX_FAILS times for a known-cause break; a crash on an UNCHANGED client
+# keeps the conservative MAX_FAILS threshold. Session/distro-agnostic: ChimeraOS/Bazzite
+# (sessions.d STEAMCMD), SteamOS (steam-launcher PATH drop-in) and Desktop Mode
+# all funnel through this one wrapper. Every step is best-effort and can never
+# itself block the launch.
+GUARD_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/ember"
+mkdir -p "$GUARD_DIR" 2>/dev/null || true
+GUARD_LAST="$GUARD_DIR/last_launch"          # mtime = start of the most recent boot
+GUARD_GFX="$GUARD_DIR/last_launch_display"   # 1/0: did the most recent launch have a display
+GUARD_COUNT="$GUARD_DIR/boot_fail_count"
+GUARD_SAFE="$GUARD_DIR/safe_mode"            # present => stay vanilla
+GUARD_FP="$GUARD_DIR/safe_mode_fingerprint"  # payload id captured when latched
+GUARD_SESSION="$GUARD_DIR/session_id"        # session the latch and fail count belong to
+GUARD_CLIENT_LAST="$GUARD_DIR/last_client"   # steamclient.so id the most recent boot ran
+GUARD_CLIENT_GOOD="$GUARD_DIR/good_client"   # steamclient.so id of the last boot that started cleanly
+GUARD_LOG="$GUARD_DIR/guard.log"
+
+# Tunables (overridable for testing).
+[ -n "${EMBER_GUARD_MAX_FAILS:-}" ] || EMBER_GUARD_MAX_FAILS=3
+[ -n "${EMBER_GUARD_STARTUP_SECS:-}" ] || EMBER_GUARD_STARTUP_SECS=180
+[ -n "${EMBER_GUARD_DUMPS_DIR:-}" ] || EMBER_GUARD_DUMPS_DIR="/tmp/dumps"
+
+guard_log() {
+	printf '%s %s\n' "$(date '+%F %T' 2>/dev/null)" "$1" >> "$GUARD_LOG" 2>/dev/null || true
+}
+# Non-blocking, auto-dismissing notice (10s, normal urgency). NOT critical:
+# the freedesktop spec lets the shell pin critical notifications on screen with
+# no timeout (KDE does), which is why an earlier critical recovery notice never
+# went away. Best-effort; never blocks the launch.
+guard_notify() {
+	if command -v notify-send >/dev/null 2>&1; then
+		notify-send -u normal -t 10000 "Steam recovery mode" "$1" >/dev/null 2>&1 || true
+	fi
+}
+guard_read_int() {
+	_v="$(cat "$1" 2>/dev/null)"
+	case "$_v" in ''|*[!0-9]*) printf 0 ;; *) printf '%s' "$_v" ;; esac
+}
+# Identify the machine's current session. The kernel's boot_id changes on every
+# boot; btime (boot epoch) is the fallback. Empty when neither is readable, in
+# which case the state simply never looks stale and the guard keeps its old
+# persistent behaviour instead of re-arming on every launch.
+guard_session_id() {
+	_sid="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
+	[ -n "$_sid" ] || _sid="$(sed -n 's/^btime //p' /proc/stat 2>/dev/null || true)"
+	printf '%s' "$_sid"
+}
+# A launch with no display tells us nothing about the injected stack: Steam
+# cannot open a display, dies inside libX11 (XQueryExtension) and writes an
+# ordinary crash_*.dmp on its way out - vanilla Steam included. Scripted or
+# remote launches must not be able to latch recovery mode for a graphical
+# session that was never started.
+guard_has_display() {
+	[ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]
+}
+# Identify the Steam client library (size:mtime of the 32-bit steamclient.so we
+# hook). A client self-update rewrites it, changing this id - the signal that a
+# startup crash is a compatibility break rather than a one-off. Empty when no
+# client is found yet (fresh install): callers then stay conservative.
+guard_client_fp() {
+	for _r in "$HOME/.steam/steam" "$HOME/.steam/debian-installation" "$HOME/.local/share/Steam"; do
+		for _arch in steamrt64 ubuntu12_32; do
+			_c="$_r/$_arch/steamclient.so"
+			if [ -e "$_c" ]; then
+				stat -c '%s:%Y' "$_c" 2>/dev/null || stat -f '%z:%m' "$_c" 2>/dev/null || printf '?'
+				return 0
+			fi
+		done
+	done
+	printf ''
+}
+# Fingerprint the injected payload (size:mtime of each piece). Updating ANY of
+# it - which the plugin does on reinstall/update - changes this, so a stuck
+# safe-mode latch auto-clears once the user has updated.
+guard_fingerprint() {
+	for _f in "$EMBERDIR/ember-core.so" \
+	          "$HOME/.local/share/CloudRedirect/cloud_redirect.so" \
+	          "$HOME/.local/share/Lumen/lumen"; do
+		if [ -e "$_f" ]; then
+			stat -c '%s:%Y' "$_f" 2>/dev/null || stat -f '%z:%m' "$_f" 2>/dev/null || printf '?'
+		else
+			printf -- '-'
+		fi
+		printf '|'
+	done
+}
+GUARD_CUR_FP="$(guard_fingerprint)"
+[ -n "${EMBER_GUARD_SESSION_ID:-}" ] || EMBER_GUARD_SESSION_ID="$(guard_session_id)"
+
+# True when Steam wrote a FATAL crash minidump during the boot that started at
+# epoch $2 (marker file $1), within that boot's first STARTUP_SECS. This is the
+# definitive "Steam crashed before it became usable" signal. A clean kill (Game
+# Mode <-> Desktop switch, shutdown) or a quick manual quit does NOT write a
+# dump, so those never count as failures - which is why we use this instead of a
+# bare "the session was short" heuristic.
+#
+# Match ONLY crash_*.dmp (fatal: segfault/abort that takes the client down).
+# Steam also writes assert_*.dmp for NON-FATAL assertions (e.g. CloudRedirect's
+# cloud-save path-resolution asserts in remotestoragefilesynccontext.cpp) while
+# it keeps running perfectly fine, and those land in the same /tmp/dumps within
+# the startup window. A bare '*.dmp' glob counted those as startup crashes and,
+# coinciding with a Steam client self-update (client-changed -> latch on first
+# crash), wrongly paused the hook on a healthy desktop boot.
+guard_startup_crash() {
+	[ -d "$EMBER_GUARD_DUMPS_DIR" ] || return 1
+	case "$2" in ''|*[!0-9]*) return 1 ;; esac
+	[ "$2" -gt 0 ] || return 1
+	_ref="$GUARD_DIR/.crash_win_ref"
+	touch -d "@$(( $2 + EMBER_GUARD_STARTUP_SECS ))" "$_ref" 2>/dev/null || { rm -f "$_ref" 2>/dev/null; return 1; }
+	_hit="$(find "$EMBER_GUARD_DUMPS_DIR" -maxdepth 1 -name 'crash_*.dmp' -newer "$1" ! -newer "$_ref" 2>/dev/null | head -n1)"
+	rm -f "$_ref" 2>/dev/null
+	[ -n "$_hit" ]
+}
+
+# New session? Drop the recovery state and give injection a fresh try. The fail
+# count goes with it: crash dumps live in /tmp, so a previous boot's outcome is
+# not assessable here anyway, and counting across boots let unrelated launches
+# accumulate towards a latch the user never saw happen.
+GUARD_PREV_SESSION="$(cat "$GUARD_SESSION" 2>/dev/null || true)"
+if [ "$EMBER_GUARD_SESSION_ID" != "$GUARD_PREV_SESSION" ]; then
+	if [ -f "$GUARD_SAFE" ]; then
+		guard_log "new session -> clearing the recovery latch and retrying injection"
+	fi
+	rm -f "$GUARD_SAFE" "$GUARD_FP" "$GUARD_COUNT" "$GUARD_LAST" "$GUARD_GFX" 2>/dev/null || true
+	printf '%s' "$EMBER_GUARD_SESSION_ID" > "$GUARD_SESSION" 2>/dev/null || true
+fi
+
+# Already latched in this session? Stay vanilla until the payload changes (user
+# updated) or the session ends.
+if [ -f "$GUARD_SAFE" ]; then
+	if [ "$(cat "$GUARD_FP" 2>/dev/null)" = "$GUARD_CUR_FP" ]; then
+		guard_log "safe mode active -> launching Steam without injection"
+		ember_exec_vanilla "$@"
+	fi
+	guard_log "payload changed since latch -> clearing safe mode, retrying injection"
+	rm -f "$GUARD_SAFE" "$GUARD_FP" "$GUARD_COUNT" "$GUARD_LAST" 2>/dev/null || true
+fi
+
+# Assess the PREVIOUS boot: it failed only if Steam crashed at startup (wrote a
+# minidump in its first STARTUP_SECS). A short but clean session is NOT a
+# failure. (find/touch/stat failing degrade to "ok", so the guard never latches
+# by accident.)
+GUARD_FAILS="$(guard_read_int "$GUARD_COUNT")"
+GUARD_CLIENT_CUR="$(guard_client_fp)"
+guard_client_changed=0
+guard_assessable=0
+if [ -f "$GUARD_LAST" ]; then
+	if [ "$(cat "$GUARD_GFX" 2>/dev/null)" = 0 ]; then
+		guard_log "previous launch had no display -> its outcome is not assessed"
+	else
+		guard_assessable=1
+	fi
+fi
+if [ "$guard_assessable" = 1 ]; then
+	_then="$(stat -c %Y "$GUARD_LAST" 2>/dev/null || stat -f %m "$GUARD_LAST" 2>/dev/null || echo 0)"
+	if guard_startup_crash "$GUARD_LAST" "$_then"; then
+		GUARD_FAILS=$(( GUARD_FAILS + 1 ))
+		# If the client that just crashed differs from the last client we saw
+		# boot cleanly, a fresh client update is almost certainly the cause -
+		# recover on the FIRST crash instead of making the user sit through
+		# MAX_FAILS loops. A one-off crash on an UNCHANGED client keeps the
+		# conservative threshold (it is far more likely transient/unrelated).
+		_prev_client="$(cat "$GUARD_CLIENT_LAST" 2>/dev/null || true)"
+		_good_client="$(cat "$GUARD_CLIENT_GOOD" 2>/dev/null || true)"
+		if [ -n "$_good_client" ] && [ "$_prev_client" != "$_good_client" ]; then
+			guard_client_changed=1
+			guard_log "steamclient.so changed since last clean boot -> first startup crash treated as a compatibility break"
+		fi
+		guard_log "previous boot crashed at startup -> fail ${GUARD_FAILS}/${EMBER_GUARD_MAX_FAILS}"
+	else
+		[ "$GUARD_FAILS" -ne 0 ] && guard_log "previous boot ok (no startup crash) -> reset fail count"
+		GUARD_FAILS=0
+		# Remember the client that just booted cleanly as the known-good baseline.
+		_prev_client="$(cat "$GUARD_CLIENT_LAST" 2>/dev/null || true)"
+		[ -n "$_prev_client" ] && printf '%s' "$_prev_client" > "$GUARD_CLIENT_GOOD" 2>/dev/null || true
+	fi
+fi
+printf '%s' "$GUARD_FAILS" > "$GUARD_COUNT" 2>/dev/null || true
+
+if [ "$GUARD_FAILS" -ge "$EMBER_GUARD_MAX_FAILS" ] || { [ "$guard_client_changed" = 1 ] && [ "$GUARD_FAILS" -ge 1 ]; }; then
+	guard_log "fail count ${GUARD_FAILS} (client_changed=${guard_client_changed}) -> latching safe mode, launching vanilla Steam"
+	printf '%s' "$GUARD_CUR_FP" > "$GUARD_FP" 2>/dev/null || true
+	: > "$GUARD_SAFE" 2>/dev/null || true
+	# Drop the half-injected appinfo.vdf so vanilla Steam rebuilds a clean one;
+	# the abandoned splice (written at preinit before the hook abort) is what
+	# stalls the engine. Steam regenerates appinfo.vdf on next launch.
+	for _r in "$HOME/.steam/steam" "$HOME/.steam/debian-installation" "$HOME/.local/share/Steam"; do
+		if [ -f "$_r/appcache/appinfo.vdf" ]; then
+			rm -f "$_r/appcache/appinfo.vdf" 2>/dev/null && guard_log "removed $_r/appcache/appinfo.vdf"
+		fi
+	done
+	guard_notify "ember paused itself for this session because Steam kept failing to start. Steam is running normally - injection is retried the next time you reboot, or right away if you update the plugin from the LuaTools menu."
+	guard_log "recovery mode latched for this session; Steam will launch unhooked until the next session or a payload update"
+	ember_exec_vanilla "$@"
+fi
+
+# Mark the start of THIS boot for the next invocation's health check, record
+# whether it can produce a meaningful verdict (a launch with no display cannot),
+# and record the client this boot is about to run so the next assessment can tell
+# whether the client changed across a crash.
+: > "$GUARD_LAST" 2>/dev/null || true
+if guard_has_display; then
+	printf 1 > "$GUARD_GFX" 2>/dev/null || true
+else
+	printf 0 > "$GUARD_GFX" 2>/dev/null || true
+fi
+printf '%s' "$GUARD_CLIENT_CUR" > "$GUARD_CLIENT_LAST" 2>/dev/null || true
+
+# Signed pattern metadata preflight. The normal path is cache-only and performs
+# no network I/O: when both exact-module catalogs are already valid, Steam
+# launches immediately and a serialized remote revalidation runs in the
+# background. A new client build has no exact cache, so only that path waits for
+# the helper's bounded mirror deadline before continuing with the embedded
+# patterns if the network is unavailable.
+ember_pattern_steam_root() {
+	for _ember_root in "$HOME/.steam/steam" \
+	                  "$HOME/.steam/debian-installation" \
+	                  "$HOME/.local/share/Steam"; do
+		if { [ -f "$_ember_root/steamrt64/steamclient.so" ] && \
+		     [ -f "$_ember_root/steamrt64/steamui.so" ]; } || \
+		   { [ -f "$_ember_root/ubuntu12_32/steamclient.so" ] && \
+		     [ -f "$_ember_root/ubuntu12_32/steamui.so" ]; }; then
+			printf '%s' "$_ember_root"
+			return 0
+		fi
+	done
+	return 1
+}
+ember_refresh_patterns() {
+	_ember_helper="$EMBERDIR/pattern-refresh"
+	[ -x "$_ember_helper" ] || return 0
+	_ember_root="$(ember_pattern_steam_root)" || return 0
+	_ember_config_root="${XDG_CONFIG_HOME:-$HOME/.config}"
+	case "$_ember_config_root" in
+		/*) ;;
+		*) _ember_config_root="$HOME/.config" ;;
+	esac
+	if env -u LD_AUDIT -u LD_PRELOAD -u LD_LIBRARY_PATH \
+	       "$_ember_helper" --cache-only \
+	       --steam-root "$_ember_root" --config-root "$_ember_config_root" \
+	       >/dev/null 2>&1 < /dev/null; then
+		(
+			trap '' HUP
+			env -u LD_AUDIT -u LD_PRELOAD -u LD_LIBRARY_PATH \
+			    "$_ember_helper" \
+			    --steam-root "$_ember_root" --config-root "$_ember_config_root"
+		) >/dev/null 2>&1 < /dev/null &
+	else
+		env -u LD_AUDIT -u LD_PRELOAD -u LD_LIBRARY_PATH \
+		    "$_ember_helper" \
+		    --steam-root "$_ember_root" --config-root "$_ember_config_root" \
+		    >/dev/null 2>&1 < /dev/null || true
+	fi
+}
+ember_refresh_patterns
+
+# CloudRedirect (optional): inject its 32-bit cloud-save hook via LD_PRELOAD.
+# Our bundled build is CloudRedirect 2.1.5 (correct save restore via
+# StripCasShaLeaf) with the steamclient.so wait extended 10s -> 120s so it
+# attaches on slow-bootstrap distros (Arch/CachyOS) too. It is a plain
+# LD_PRELOAD library: loading it as an LD_AUDIT auditor corrupts the client
+# heap (realloc(): invalid pointer) during init, so it must NOT go in the
+# LD_AUDIT list. ember stays on LD_AUDIT (ember-library-inject.so first).
+# CloudRedirect's constructor self-removes itself from LD_PRELOAD so child
+# processes (the game, steamwebhelper) don't inherit it.
+CR_SO="$HOME/.local/share/CloudRedirect/cloud_redirect.so"
+# Skip 32-bit cloud_redirect.so when running 64-bit steamrt64 (ELFCLASS64 = 02).
+if [ -f "$CR_SO" ] && [ "$(od -An -tx1 -j4 -N1 "$CR_SO" 2>/dev/null | tr -d '[:space:]')" = "02" ]; then
+	export LD_PRELOAD="$CR_SO${LD_PRELOAD:+:$LD_PRELOAD}"
+fi
+
+# extest (Steam Input on Wayland): SteamOS and Bazzite ship libextest, an X11
+# XTEST shim that lets the Steam Controller / Steam Input drive the desktop
+# cursor under Wayland (X11 has native XTEST, so it's only needed on Wayland).
+# Their own desktop launchers (bazzite-steam / steam-jupiter) LD_PRELOAD it on
+# Wayland. We launch the Steam binary directly — on purpose, so our LD_AUDIT and
+# CloudRedirect survive (those launchers do `env LD_PRELOAD=...`, which REPLACES
+# the list and would drop cloud_redirect.so) — so we replicate just this one
+# preload, generically: only on Wayland and only when the lib actually exists
+# (a no-op on distros that don't ship it).
+if [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; then
+	for _ext in /usr/lib/extest/libextest.so \
+	            /usr/lib64/extest/libextest.so \
+	            /usr/lib/x86_64-linux-gnu/extest/libextest.so; do
+		if [ -f "$_ext" ]; then
+			export LD_PRELOAD="${LD_PRELOAD:+$LD_PRELOAD:}$_ext"
+			break
+		fi
+	done
+fi
+
+# Lumen (millennium-less LuaTools bridge): ensure Steam's CEF remote-debugging
+# endpoint is enabled, then launch the Lumen sidecar DETACHED and WITHOUT the
+# loader env (it must use its own static libs, not Steam's 32-bit runtime).
+# Lumen injects the LuaTools frontend via CDP and hosts the backend in-process.
+# Single-instance guarded so a second wrapper invocation doesn't stack sidecars.
+LUMEN_DIR="$HOME/.local/share/Lumen"
+# luatools-moon can install a user service that keeps Lumen around for every
+# Steam launch, including launchers that never touch this wrapper. When that
+# unit is enabled it owns the sidecar; starting another one from here would just
+# race it to Lumen's own singleton lock.
+LUMEN_UNIT="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/lumen.service"
+lumen_owned_by_service=0
+# A session bus is the other half of "systemd can start it": without one, an
+# enabled unit would never come up and the sidecar would simply be missing.
+if [ -f "$LUMEN_UNIT" ] && [ -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/bus" ] \
+   && command -v systemctl >/dev/null 2>&1 \
+   && systemctl --user is-enabled --quiet lumen.service >/dev/null 2>&1; then
+	lumen_owned_by_service=1
+	# It is normally up already; nudge it if it stopped (it idles out after a
+	# long Steam-free stretch, or gave up after a crash loop).
+	systemctl --user is-active --quiet lumen.service >/dev/null 2>&1 \
+		|| systemctl --user start lumen.service >/dev/null 2>&1 &
+fi
+if [ "$lumen_owned_by_service" = 0 ] && [ -x "$LUMEN_DIR/lumen" ] \
+   && ! pgrep -f "$LUMEN_DIR/lumen" >/dev/null 2>&1; then
+	touch "$HOME/.steam/steam/.cef-enable-remote-debugging" 2>/dev/null || true
+	touch "$HOME/.steam/debian-installation/.cef-enable-remote-debugging" 2>/dev/null || true
+	# The sidecar's output used to go to /dev/null, so a Lumen that failed to
+	# attach left nothing to look at. Keep a small log instead.
+	lumen_log="$LUMEN_DIR/lumen.log"
+	if [ -f "$lumen_log" ] && [ "$(wc -c <"$lumen_log" 2>/dev/null || echo 0)" -gt 1048576 ]; then
+		mv -f "$lumen_log" "$lumen_log.1" 2>/dev/null || true
+	fi
+	printf '\n--- %s: starting Lumen\n' "$(date '+%F %T' 2>/dev/null)" >>"$lumen_log" 2>/dev/null \
+		|| lumen_log=/dev/null
+	env -u LD_AUDIT -u LD_PRELOAD -u LD_LIBRARY_PATH \
+	    LUMEN_BACKEND_DIR="$LUMEN_DIR/luatools/backend" \
+	    LUMEN_LUA_DIR="$LUMEN_DIR/lua" \
+	    setsid "$LUMEN_DIR/lumen" >>"$lumen_log" 2>&1 < /dev/null &
+fi
+
+# Keep the payload in step with our releases. Steam updates move the things
+# ember finds by pattern matching, and a payload that no longer matches is
+# what makes games stop launching. The updater is throttled, detached and
+# silent: it only swaps files between launches and keeps the old ones in
+# backup/. EMBER_NO_AUTOUPDATE=1 turns it off.
+if [ -x "$EMBERDIR/ember-autoupdate.sh" ] && [ "${EMBER_NO_AUTOUPDATE:-0}" != 1 ]; then
+	if command -v setsid >/dev/null 2>&1; then
+		env -u LD_AUDIT -u LD_PRELOAD -u LD_LIBRARY_PATH \
+		    setsid "$EMBERDIR/ember-autoupdate.sh" >/dev/null 2>&1 < /dev/null &
+	else
+		env -u LD_AUDIT -u LD_PRELOAD -u LD_LIBRARY_PATH \
+		    "$EMBERDIR/ember-autoupdate.sh" >/dev/null 2>&1 < /dev/null &
+	fi
+fi
+
+AUDIT="$EMBERDIR/ember-library-inject.so:$EMBERDIR/ember-core.so"
+
+# Re-assert desktop-entry coverage without putting reconciliation on the launch
+# critical path. Prefer the serialized guardian; retain the legacy CLI fallback
+# during upgrades or on desktops without a working user manager.
+if command -v systemctl >/dev/null 2>&1 && \
+   systemctl --user --quiet is-enabled ember-desktop-guardian.path >/dev/null 2>&1; then
+	systemctl --user start ember-desktop-guardian.service >/dev/null 2>&1 &
+elif [ -x "$EMBERDIR/ensure-desktop-coverage.sh" ]; then
+	# Lowest priority we can give it: this fallback runs concurrently with Steam's
+	# own start, and a pass that does have work to do is seconds of shell CPU.
+	if command -v nice >/dev/null 2>&1; then
+		WRAPPER="$EMBERDIR/path/steam" nice -n 10 "$EMBERDIR/ensure-desktop-coverage.sh" --user >/dev/null 2>&1 &
+	else
+		WRAPPER="$EMBERDIR/path/steam" "$EMBERDIR/ensure-desktop-coverage.sh" --user >/dev/null 2>&1 &
+	fi
+fi
+
+if [ -n "$EMBER_INHERITED_AUDIT" ]; then
+	export LD_AUDIT="$AUDIT:$EMBER_INHERITED_AUDIT"
+else
+	export LD_AUDIT="$AUDIT"
+fi
+exec "$STEAM_BIN" "$@"
+EOF
+
+	# The root-owned launcher shim refuses group/other-writable wrappers. Set the
+	# complete mode explicitly so a user umask such as 0002 cannot produce 0775.
+	chmod 0755 "$EMBERDIR/path/steam"
+
+	log_success "Steam wrapper created at $EMBERDIR/path/steam"
+	echo ""
+	return 0
+}
+
+# NOTE: the user-level autostart override (mirror the system/Steam autostart entry
+# so the desktop session's auto-launch of Steam runs through our wrapper) now lives
+# in the shared coverage lib as dc_seed_autostart_override, invoked from dc_run —
+# so it runs at install AND on every per-launch/Lumen re-assert, and covers ANY
+# distro that auto-starts Steam via /etc/xdg/autostart (SteamOS/Bazzite and beyond),
+# not just at install time. The old setup_autostart_override/is_autostart_steam_desktop/
+# rewrite_primary_exec_to_wrapper helpers were removed as dead code.
+
+# ---------------------------------------------------------------------------
+# System launcher interception
+# ---------------------------------------------------------------------------
+# Every launch path (.desktop entries, terminal invocations, XDG autostart,
+# third-party programs calling the steam binary) converges on the system
+# launcher script.  On Arch/Fedora this is /usr/bin/steam; on Debian/Ubuntu/
+# Mint it is /usr/games/steam.  These scripts are package-manager-owned and
+# have NO integrity check (unlike steam.sh which is SHA-verified), so wrapping
+# them is safe and survives Steam self-updates.
+#
+# System launcher interception and restoration live in the shared sourceable
+# library loaded near the top of this script. Keeping one implementation here
+# avoids divergent backup, verification, and pre-bootstrap stub behavior.
+
+# Current launcher integration uses the shared sourceable library.
+setup_system_launcher() {
+	if is_immutable_distro; then
+		log_info "Immutable distro: skipping system launcher interception"
+		return 1
+	fi
+	# Do not touch Debian's pre-bootstrap Install Steam package stub. The
+	# eligibility check runs before sudo, backups, or any launcher write.
+	if ! ls_steam_bootstrapped; then
+		log_info "Steam is not bootstrapped yet: leaving the distro installer launcher untouched"
 		return 1
 	fi
 
-	if ! type -P flatpak > /dev/null; then
-		echo "Flatpak not found! Do you have flatpak installed?"
+	LS_EMBERDIR="$EMBERDIR"
+	LS_BACKUP_ROOT="$EMBERDIR/system-launcher-backup"
+	local launcher launcher_detected=0 launcher_needs_sudo=0
+	while IFS= read -r launcher; do
+		[ -n "$launcher" ] || continue
+		launcher_detected=1
+		[ -w "$launcher" ] || launcher_needs_sudo=1
+	done < <(ls_detect_launchers)
+	if [ "$launcher_detected" = 0 ]; then
+		log_warn "No eligible distro Steam launcher was found"
 		return 1
 	fi
-
-	if ! flatpak info "$FLATPAK_APP_ID" > /dev/null 2>&1; then
-		echo "Flatpak Steam not installed! Do you have Steam Flatpak installed?"
-		return 1
+	if [ "$launcher_needs_sudo" = 0 ]; then
+		LS_SUDO=""
+	elif [ -n "${SUDO_ASKPASS:-}" ] && [ -x "${SUDO_ASKPASS:-}" ]; then
+		LS_SUDO="sudo -A"
+	elif [ "${EMBER_SUDO_PRIMED:-0}" = 1 ] && command -v sudo >/dev/null 2>&1; then
+		LS_SUDO="sudo"
+	elif [ "${EMBER_SUDO_DENIED:-0}" != 1 ] && command -v sudo >/dev/null 2>&1 \
+	     && sudo -v 2>/dev/null; then
+		LS_SUDO="sudo"
+	else
+		LS_SUDO=""
 	fi
+	if ls_install_shims; then
+		log_success "Distro Steam launcher interception is active"
+		return 0
+	fi
+	log_warn "Could not install the distro launcher shim; user desktop coverage remains the fallback"
+	return 1
+}
 
-	if [ ! -d "$FLATPAK_SLSDIR" ]; then
-		mkdir -p "$FLATPAK_SLSDIR"
-		if [[ $? -ne 0 ]]; then
-			echo "Unable to create $FLATPAK_SLSDIR! Aborting flatpak install"
+restore_system_launchers() {
+	EMBER_KEEP_LAUNCHER_BACKUP=0
+	EMBER_KEEP_LAUNCHER_TREE=0
+	if is_immutable_distro; then
+		local launcher
+		while IFS= read -r launcher; do
+			[ -n "$launcher" ] || continue
+			EMBER_KEEP_LAUNCHER_BACKUP=1
+			EMBER_KEEP_LAUNCHER_TREE=1
+			log_warn "Immutable distro has a surviving system launcher shim at $launcher; retaining the complete helper tree"
 			return 1
+		done < <(ls_wrapped_paths)
+		return 0
+	fi
+	LS_EMBERDIR="$EMBERDIR"
+	LS_BACKUP_ROOT="$EMBERDIR/system-launcher-backup"
+	if [ -n "${SUDO_ASKPASS:-}" ] && [ -x "${SUDO_ASKPASS:-}" ]; then
+		LS_SUDO="sudo -A"
+	elif command -v sudo >/dev/null 2>&1; then
+		LS_SUDO="sudo"
+	else
+		LS_SUDO=""
+	fi
+	if ls_restore_shims; then
+		return 0
+	fi
+	# A failed restore may be recoverable with the retained original. If no
+	# usable mirrored or exactly-associated legacy backup exists, the wrapper
+	# tree itself must survive uninstall so the shim remains operational.
+	local launcher backup
+	while IFS= read -r launcher; do
+		[ -n "$launcher" ] || continue
+		backup="$(ls_backup_path "$launcher")"
+		if [ -f "$backup" ] && ls_backup_is_usable "$backup" && \
+		   ls_shim_references_backup "$launcher" "$backup"; then
+			continue
+		fi
+		# A mirrored file is a safe retry fallback only when this live shim
+		# explicitly names it. Otherwise try the exactly-associated legacy file;
+		# if neither is safe, keep the complete helper tree alive.
+		backup="$(ls_legacy_backup_path "$launcher")"
+		if ! ls_legacy_backup_is_unambiguous_restore "$backup" || \
+		   ! ls_shim_references_backup "$launcher" "$backup"; then
+			EMBER_KEEP_LAUNCHER_TREE=1
+		fi
+	done < <(ls_wrapped_paths)
+	EMBER_KEEP_LAUNCHER_BACKUP=1
+	log_warn "Some system launcher shims could not be restored; retaining their backups for a later retry"
+	return 1
+}
+
+setup_path_and_desktop()
+{
+	log_info "Setting up PATH and desktop integration"
+	local system_desktop_changed=0 user_desktop_changed=0
+
+	# --- Shell PATH integration -------------------------------------------
+	local rc found=0
+	for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+		[ -f "$rc" ] || continue
+		if grep -q "ember/path" "$rc" 2>/dev/null; then
+			log_success "Already in $(basename "$rc")"
+		else
+			{
+				echo ''
+				echo '# ember: Add wrapper to PATH'
+				echo 'export PATH="$HOME/.local/share/ember/path:$PATH"'
+			} >> "$rc"
+			log_success "Added wrapper to $(basename "$rc")"
+		fi
+		found=1
+	done
+	if [ "$found" = 0 ]; then
+		# Create a .bashrc if no shell rc files exist (rare but possible).
+		echo 'export PATH="$HOME/.local/share/ember/path:$PATH"' > "$HOME/.bashrc"
+		log_success "Created ~/.bashrc with wrapper PATH"
+	fi
+
+	# --- Detect Steam binary ----------------------------------------------
+	local steam_bin steam_bootstrapped=0
+	steam_bin="$(detect_steam_binary)"
+	if [ -z "$steam_bin" ]; then
+		log_warn "Steam doesn't appear to be installed yet"
+		log_warn "Install Steam first, then re-run: ./setup.sh install"
+		return 0
+	fi
+	if ls_steam_bootstrapped; then
+		steam_bootstrapped=1
+		log_success "Steam data root is bootstrapped"
+	else
+		log_info "Steam installer stub detected before bootstrap; injection coverage is deferred"
+	fi
+	log_success "Found Steam binary at $steam_bin"
+
+	# --- Mandatory user coverage, then optional system fallback -------------
+	mkdir -p "$USER_APPS"
+	export DC_STEAM_INSTALLED="$steam_bootstrapped"
+	mkdir -p "$DC_BACKUP_ROOT" 2>/dev/null || {
+		log_error "Could not create desktop backup directory: $DC_BACKUP_ROOT"
+		return 1
+	}
+
+	# Same-ID user shadows are the authoritative layer and are reconciled before
+	# any privilege prompt. A per-entry reconciliation failure is retryable (the
+	# guardian timer/path retries it), so it must NOT abort installation of the
+	# guardian itself — that would leave the machine with no ongoing self-healing,
+	# which is exactly the "injection lost after reboot" failure.
+	# DC_FORCE: installing is never a boot path, and the shipped coverage logic may
+	# behave differently from the one that recorded the last digest, so the
+	# unchanged-input fast path must not apply here.
+	if DC_FORCE=1 dc_guardian_run; then
+		log_success "Reconciled user desktop entries"
+	else
+		log_warn "Some user desktop entries could not be fully reconciled yet; the guardian will retry them"
+	fi
+
+	# User-manager integration is an acceleration/repair layer. Desktop shadows
+	# remain functional if systemd --user is unavailable.
+	local guardian_status
+	dgu_install_units; guardian_status=$?
+	[ "$guardian_status" = 1 ] && dgu_enable_units
+	[ "$guardian_status" = 2 ] && log_warn "Could not install all desktop guardian units; user desktop coverage remains active"
+	dgu_install_autostart_dropins; guardian_status=$?
+	[ "$guardian_status" = 2 ] && log_warn "Could not install all generated-autostart drop-ins; XDG shadows remain active"
+
+	# Enabling the units is best-effort (systemctl --user may be unreachable when
+	# the installer is run via sudo/root or a non-graphical session). Verify it
+	# actually took: silently-inert units are the top cause of injection being
+	# lost on the next boot, so surface it clearly instead of reporting success.
+	if command -v systemctl >/dev/null 2>&1; then
+		if ! systemctl --user is-enabled ember-desktop-guardian.path >/dev/null 2>&1; then
+			log_warn "Desktop guardian installed but NOT active (systemd --user unreachable at install time). Cold-boot injection self-healing is OFF; re-run this installer from your normal desktop session (not via sudo/root)."
 		fi
 	fi
 
-	cp -v ./bin/* "$FLATPAK_SLSDIR/"
+	# Mutable systems prefer the distro launcher shim, but user-local desktop
+	# coverage above remains mandatory as a safety net on every system.
+	local coverage_policy=desktop
+	local coverage_status_file="$EMBERDIR/coverage-policy.effective"
+	if setup_system_launcher; then
+		coverage_policy=launcher
+	fi
+	if ! dc_write_policy "$coverage_policy"; then
+		log_warn "Could not persist launch coverage policy; keeping the desktop fallback"
+		if ! dc_forget_policy; then
+			log_warn "Could not clear the previous launch coverage policy"
+		fi
+		mkdir -p "$(dirname "$coverage_status_file")" 2>/dev/null || true
+		printf 'desktop\n' > "$coverage_status_file" 2>/dev/null || true
+		coverage_policy=desktop
+	else
+		rm -f -- "$coverage_status_file" 2>/dev/null || true
+	fi
 
-	flatpak override --user --env=LD_AUDIT="$FLATPAK_LD_AUDIT" --env=SHARED_LIBRARY_GUARD=0 "$FLATPAK_APP_ID"
+	if [ "$coverage_policy" = launcher ]; then
+		log_info "Distro launcher shim is primary; new system desktop entries are left untouched"
+	elif is_immutable_distro; then
+		log_info "Immutable distro (read-only /usr): using user-level coverage only; no administrator access requested."
+	elif [ "${EMBER_SUDO_DENIED:-0}" = 1 ]; then
+		log_warn "Administrator access was already declined; keeping user-local coverage without retrying sudo."
+	elif command -v sudo >/dev/null 2>&1; then
+		# Mutable systems retain the historical system layer only when the
+		# launcher shim could not be installed. Denying sudo never discards the
+		# already-working user coverage.
+		if ! sudo -v; then
+			log_warn "Administrator access not granted: the system-wide Steam entry stays unpatched. Menu and taskbar launches still use the injected per-user entry (it wins by desktop-file-id); only a launcher pinned by absolute path to the system file would skip the wrapper. Re-run with admin access to also cover the system entry."
+		else
+			DC_SUDO="sudo"
+			export DC_SUDO
+			dc_migrate_legacy_backups --system
+			if EMBER_COVERAGE_POLICY=desktop DC_FORCE=1 dc_run --system; then
+				system_desktop_changed=1
+				log_success "Patched optional system Steam desktop entries"
+			else
+				log_warn "Optional system desktop fallback could not be fully applied"
+			fi
+		fi
+	else
+		log_warn "sudo not available: the system-wide Steam entry stays unpatched. Menu and taskbar launches still use the injected per-user entry (it wins by desktop-file-id); only a launcher pinned by absolute path to the system file would skip the wrapper."
+	fi
 
-	echo "Flatpak install done!"
+	# Fallback: if the user still has no menu entry (no donor anywhere), write
+	# a minimal launcher. Before Steam bootstrap it must call the distro installer
+	# directly; routing that stub through our wrapper would inject into the
+	# installer and could break the first Steam installation.
+	if [ ! -e "$USER_DESKTOP" ]; then
+		local minimal_exec="$EMBERDIR/path/steam"
+		local minimal_tags="$DC_SEED_TAG"
+		if [ "$steam_bootstrapped" != 1 ]; then
+			minimal_exec="$steam_bin"
+			minimal_tags="$DC_SEED_TAG
+$DC_PREBOOTSTRAP_TAG"
+			log_info "Steam is not bootstrapped; keeping the minimal launcher vanilla"
+		fi
+		log_info "Writing a minimal Steam launcher"
+		cat > "$USER_DESKTOP" << EOF
+[Desktop Entry]
+$EMBER_TAG
+$minimal_tags
+Name=Steam
+Comment=Application for managing and playing games on Steam
+Exec=$minimal_exec %U
+Icon=steam
+Terminal=false
+Type=Application
+Categories=Network;FileTransfer;Game;
+MimeType=x-scheme-handler/steam;x-scheme-handler/steamlink;
+PrefersNonDefaultGPU=true
+EOF
+		chmod 0644 "$USER_DESKTOP"
+		user_desktop_changed=1
+		log_success "Created $USER_DESKTOP"
+	fi
+
+	# Guardian reconciliation already converged user caches. Refresh here only
+	# for the direct minimal fallback or a successful mutable-system pass.
+	if command -v update-desktop-database >/dev/null 2>&1; then
+		[ "$user_desktop_changed" = 1 ] && \
+			update-desktop-database "$USER_APPS" >/dev/null 2>&1 || true
+		[ "$system_desktop_changed" = 1 ] && command -v sudo >/dev/null 2>&1 && \
+			sudo update-desktop-database "/usr/share/applications" >/dev/null 2>&1 || true
+	fi
+
+	echo ""
+	return 0
+}
+
+install_steamstub()
+{
+	TARGET="$1"
+	HELPERSRC="./tools/steamstub-bypass"
+
+	if [ ! -d "$HELPERSRC" ]; then
+		log_warn "Helper scripts not found at $HELPERSRC — skipping Steam Stub setup"
+		return 1
+	fi
+
+	log_info "Installing Steamless helper"
+	mkdir -p "$TARGET/steamstub-bypass"
+	cp -v "$HELPERSRC/run-steamless.sh"     "$TARGET/steamstub-bypass/"
+	cp -v "$HELPERSRC/install-steamless.sh" "$TARGET/steamstub-bypass/"
+	cp -v "$HELPERSRC/scan-all.sh"          "$TARGET/steamstub-bypass/"
+	chmod u+x "$TARGET/steamstub-bypass/run-steamless.sh" \
+	          "$TARGET/steamstub-bypass/install-steamless.sh" \
+	          "$TARGET/steamstub-bypass/scan-all.sh"
+
+	echo ""
+
+	# Prefer the Steamless kit bundled in the release (offline, no
+	# network).  Only fall back to the GitHub download if the bundle is
+	# absent (e.g. a dev tree).  The download path is the historical
+	# silent-failure source behind "Application load error 6".
+	if [ -f "./tools/steamless-bin/Steamless.CLI.exe" ]; then
+		log_info "Installing bundled Steamless kit"
+		mkdir -p "$TARGET/steamless-bin"
+		cp -r ./tools/steamless-bin/. "$TARGET/steamless-bin/"
+	else
+		log_warn "No bundled Steamless kit; fetching from upstream (needs internet)"
+		bash "$TARGET/steamstub-bypass/install-steamless.sh" \
+			--target "$TARGET/steamless-bin" || true
+	fi
+
+	# Verify the kit actually landed.  A missing CLI means the SteamStub
+	# bypass is silently disabled at runtime and DRM-locked games fail
+	# with "Application load error 6" — make that loud here.
+	if [ -f "$TARGET/steamless-bin/Steamless.CLI.exe" ]; then
+		log_success "Steamless ready ($TARGET/steamless-bin)"
+	else
+		log_warn "Steamless kit NOT installed — games with Steam DRM will"
+		log_warn "fail to launch (Application load error 6). To fix later:"
+		log_warn "  bash $TARGET/steamstub-bypass/install-steamless.sh --target $TARGET/steamless-bin"
+	fi
+	echo ""
 }
 
 install_all()
 {
-	install_slssteam
+	print_banner
 
-	install_path
-	if [[ $? -eq 0 ]]; then
-		install_wrapper steam
-		install_wrapper steam-runtime
-		#Wrapping the steam-jupiter doesn't work, probably doesn't get called from PATH
-		install_wrapper steam-native
-	fi
+	print_section "Stopping Steam"
+	kill_steam
 
-	install_desktop_file steam
-	#No steam-runtime.desktop (atleast on my Arch install...)
-	install_desktop_file steam-native
+	print_section "Installing libraries"
+	install_ember
 
-	echo "Install script done! If any wrappers or .desktop files have been created it was successfull."
+	print_section "Creating Steam wrapper"
+	create_steam_wrapper
+
+	print_section "Configuring PATH & desktop entry"
+	setup_path_and_desktop
+
+	print_section "Installing Steamless helper"
+	install_steamstub "$EMBERDIR"
+
+	print_install_complete
 }
 
+# ============================================================================
+# Uninstall
+# ============================================================================
+
+restore_or_remove_desktop() {
+	local f="$1"
+	local backup="$DC_BACKUP_ROOT/${f#/}" legacy
+	local sudo_cmd="${2:-}"
+
+	[ -f "$f" ] || return 0
+	if [ ! -f "$backup" ]; then
+		for legacy in "$f.ember-backup" "$f.ember-bak"; do
+			[ -f "$legacy" ] || continue
+			mkdir -p "$(dirname "$backup")" 2>/dev/null || break
+			if [ -n "$sudo_cmd" ]; then
+				$sudo_cmd cat -- "$legacy" > "$backup" 2>/dev/null || { rm -f "$backup"; break; }
+			else
+				cp -- "$legacy" "$backup" 2>/dev/null || { rm -f "$backup"; break; }
+			fi
+			$sudo_cmd rm -f -- "$legacy" 2>/dev/null || true
+			break
+		done
+	fi
+	if ! is_patched_desktop "$f" && [ ! -f "$backup" ]; then
+		return 0
+	fi
+
+	if [ -f "$backup" ]; then
+		log_info "Restoring $f from backup"
+		if $ember_sudo cp -- "$backup" "$f"; then
+			rm -f -- "$backup"
+			log_success "Restored $f"
+		fi
+	else
+		log_info "Removing $f (no backup found)"
+		$sudo_cmd rm -- "$f"
+		log_success "Removed $f"
+	fi
+}
+
+uninstall()
+{
+	print_banner
+	print_section "Uninstalling ember"
+	local desktop_restore_complete=1
+	local launcher_restore_complete=1
+
+	kill_steam
+
+	# Remove from shell rc files.
+	local rc
+	for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+		[ -f "$rc" ] || continue
+		if grep -q "ember/path" "$rc" 2>/dev/null; then
+			log_info "Cleaning wrapper PATH entry from $(basename "$rc")"
+			sed -i '/# ember: Add wrapper to PATH/d' "$rc"
+			sed -i '\|ember/path|d' "$rc"
+		fi
+	done
+
+	# Stop generated launch paths before restoring their desktop-file sources.
+	# Removal is sentinel-scoped and therefore preserves foreign unit drop-ins.
+	if command -v dgu_remove_autostart_dropins >/dev/null 2>&1; then
+		dgu_remove_autostart_dropins || true
+	fi
+	if command -v dgu_remove_units >/dev/null 2>&1; then
+		dgu_remove_units || true
+	fi
+
+	# Restore every patched/symlinked *steam*.desktop (menu user+system incl. the
+	# stub, ~/Desktop shortcut, autostart user+system) from their backups via the
+	# shared lib. System paths use sudo when available.
+	if command -v dc_restore_all >/dev/null 2>&1; then
+		if is_immutable_distro || ! command -v sudo >/dev/null 2>&1; then
+			DC_SUDO=""
+		else
+			DC_SUDO="sudo"
+		fi
+		export DC_SUDO
+		if dc_restore_all; then
+			log_success "Restored Steam desktop entries"
+		else
+			desktop_restore_complete=0
+			log_warn "System desktop restoration is unavailable; retaining user desktop coverage and helpers for a later retry"
+		fi
+	else
+		# Lib unavailable (older layout): fall back to the legacy per-file restore.
+		restore_or_remove_desktop "$USER_DESKTOP"
+		[ -f "$SYS_DESKTOP" ] && command -v sudo >/dev/null 2>&1 && \
+			restore_or_remove_desktop "$SYS_DESKTOP" sudo
+	fi
+	if command -v update-desktop-database >/dev/null 2>&1; then
+		update-desktop-database "$USER_APPS" >/dev/null 2>&1 || true
+		! is_immutable_distro && command -v sudo >/dev/null 2>&1 && \
+			sudo update-desktop-database "/usr/share/applications" >/dev/null 2>&1 || true
+	fi
+
+	# Legacy: /usr/games/steam patch from older versions.
+	if ! is_immutable_distro && [ -f "/usr/games/steam" ] && grep -q "ember" "/usr/games/steam" 2>/dev/null; then
+		log_info "Found legacy /usr/games/steam modification"
+		if [ -f "/usr/games/steam.ember-backup" ]; then
+			log_info "Restoring original /usr/games/steam (requires sudo)"
+			sudo cp "/usr/games/steam.ember-backup" "/usr/games/steam"
+			sudo rm "/usr/games/steam.ember-backup"
+			log_success "Restored /usr/games/steam"
+		else
+			log_warn "Legacy modification found but no backup exists"
+		fi
+	fi
+
+	# Restore any wrapped system launchers before removing the dir.
+	if restore_system_launchers; then
+		launcher_restore_complete=1
+	else
+		launcher_restore_complete=0
+	fi
+
+	# Policy state lives outside EMBERDIR. Forget it only after launcher restore;
+	# retaining it with a surviving shim keeps interrupted uninstalls recoverable.
+	if [ "$launcher_restore_complete" = 1 ]; then
+		if command -v dc_forget_policy >/dev/null 2>&1; then
+			dc_forget_policy || true
+		else
+			local state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
+			case "$state_home" in
+				/*) : ;;
+				*) state_home="$HOME/.local/state" ;;
+			esac
+			rm -f -- "$state_home/ember/coverage.policy" 2>/dev/null || true
+		fi
+	else
+		log_warn "Keeping coverage.policy while a system launcher shim still needs restoration"
+	fi
+
+	if [ "${EMBER_KEEP_LAUNCHER_TREE:-0}" = 1 ] && [ -d "$EMBERDIR" ]; then
+		log_warn "Keeping $EMBERDIR because a system launcher has no recoverable original"
+	elif [ "${EMBER_KEEP_LAUNCHER_BACKUP:-0}" = 1 ] && [ -d "$EMBERDIR" ]; then
+		log_warn "Keeping $EMBERDIR/system-launcher-backup because a system launcher shim could not be restored"
+		find "$EMBERDIR" -mindepth 1 -maxdepth 1 \
+			! -name system-launcher-backup -exec rm -rf -- {} + 2>/dev/null || true
+	elif [ -d "$EMBERDIR" ] && [ "$desktop_restore_complete" = 1 ]; then
+		log_info "Removing $EMBERDIR"
+		rm -rf "$EMBERDIR"
+	elif [ -d "$EMBERDIR" ]; then
+		log_warn "Keeping $EMBERDIR because desktop restoration is incomplete"
+	fi
+
+	print_uninstall_complete
+}
+
+# ============================================================================
+# Entry point
+# ============================================================================
+
+if [ "${EMBER_SETUP_LIB_ONLY:-0}" = 1 ]; then
+	if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+		return 0
+	fi
+	exit 0
+fi
+
 if [[ $# -lt 1 ]]; then
-	echo "Usage: $0 install|uninstall|flatpak-install|flatpak-uninstall"
+	print_banner
+	echo -e "${BOLD}Usage:${NC}  $0 ${GREEN}install${NC} | ${GREEN}uninstall${NC}"
+	echo ""
 	exit 0
 fi
 
@@ -193,11 +1482,8 @@ if [ "$1" == "install" ]; then
 	install_all
 elif [ "$1" == "uninstall" ]; then
 	uninstall
-elif [ "$1" == "flatpak-install" ]; then
-	install_flatpak
-elif [ "$1" == "flatpak-uninstall" ]; then
-	uninstall_flatpak
 else
-	echo "Unknown command $1!"
+	log_error "Unknown command: $1"
+	echo -e "${BOLD}Usage:${NC}  $0 ${GREEN}install${NC} | ${GREEN}uninstall${NC}"
 	exit 1
 fi

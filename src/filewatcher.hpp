@@ -1,40 +1,31 @@
 #pragma once
 
-#include <atomic>
-#include <csignal>
-#include <filesystem>
 #include <pthread.h>
-#include <sys/inotify.h>
-#include <thread>
+#include <string>
 #include <unordered_map>
+#include <vector>
 
-
-typedef void(*FileModifyEvent_t)(const std::filesystem::path&, const int eventMask);
+typedef void(*FileModifyEvent_t)();
 
 class CFileWatcher
 {
-	static void* watchLoop(void* args);
-
-	int eventMask;
-	std::thread watchThread;
+	pthread_t watchThread;
 
 public:
-	constexpr static int INTERRUPT_SIG = SIGINT;
-	constexpr static int WATCH_MASK = IN_CLOSE_WRITE | IN_MOVED_TO | IN_DELETE;
-
-	static void installSigHandler();
-
-	std::atomic_bool running;
 	int notifyFd;
-	std::unordered_map<int, std::filesystem::path> fileFdMap;
+	std::unordered_map<int, std::string> fileFdMap;
+
+	std::vector<std::string> watchedPaths;
 
 	FileModifyEvent_t onModify;
 
-	CFileWatcher(const FileModifyEvent_t onModify, const int eventMask = WATCH_MASK);
+	CFileWatcher(FileModifyEvent_t onModify);
 	~CFileWatcher();
 
-	int addFile(const std::filesystem::path& path);
-	bool removeFile(const std::filesystem::path& path);
+	bool addFile(const char* path);
+	void rearm();
 	bool start();
 	void stop();
+
+	static void stopAllForShutdown();
 };

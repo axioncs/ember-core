@@ -1,0 +1,74 @@
+#include "stats_policy.hpp"
+
+#include "packagepatch.hpp"
+#include "../config.hpp"
+#include "../globals.hpp"
+#include "../sdk/CAppOwnershipInfo.hpp"
+#include "../sdk/CUser.hpp"
+#include "../sdk/CSteamEngine.hpp"
+
+namespace
+{
+StatsPolicy::Store state;
+}
+
+void StatsPolicy::setAccount(uint32_t id) { state.setAccount(id); }
+void StatsPolicy::invalidate() { state.invalidate(); }
+uint32_t StatsPolicy::account() { return state.account(); }
+StatsPolicy::Context StatsPolicy::context() { return state.context(); }
+void StatsPolicy::observe(Context context, uint32_t app, bool success, const CAppOwnershipInfo* info)
+{
+	if (!info || !g_config.isAddedAppId(app)) return;
+	state.observe(context.account, app, success, info->subId,
+	              info->ownsLicense, info->licenseExpired, context.epoch);
+}
+
+bool StatsPolicy::hasNativeLicense(uint32_t app)
+{
+	return state.hasNativeLicense(state.account(), app);
+}
+
+void StatsPolicy::observeNativePackage(uint32_t package, uint32_t app)
+{
+	state.observePackage(package, app);
+}
+
+void StatsPolicy::observeNativePackage(Context expected, uint32_t package,
+                                       uint32_t app)
+{
+	state.observePackage(expected, package, app);
+}
+
+void StatsPolicy::replaceNativePackageApps(
+	Context expected, const std::vector<uint32_t>& apps)
+{
+	state.replacePackageApps(expected, apps);
+}
+
+uint64_t StatsPolicy::localEpoch(uint32_t app, uint32_t id, bool refresh)
+{
+	if (!id || id != state.account() || !g_config.isAddedAppId(app) ||
+	    g_config.shouldExcludeAppId(app)) return 0;
+	if (refresh)
+	{
+		const auto context = state.context();
+		if (context.account != id) return 0;
+		auto* user = getLocalUser();
+		if (!user) return 0;
+		CAppOwnershipInfo info{};
+		info.subId = -1;
+		const bool success = user->checkAppOwnership(app, &info);
+		state.observe(id, app, success, info.subId, info.ownsLicense,
+		              info.licenseExpired, context.epoch);
+	}
+
+	if (!PackagePatch::isInjectedAppId(app)) return 0;
+	return state.localEpoch(id, app);
+}
+
+extern "C" uint64_t ember_local_stats_epoch_v1(uint32_t app, uint32_t id,
+                                                uint32_t refresh) noexcept
+{
+	try { return StatsPolicy::localEpoch(app, id, refresh == 1); }
+	catch (...) { return 0; }
+}

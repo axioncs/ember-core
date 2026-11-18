@@ -1,213 +1,592 @@
-#Thanks to https://stackoverflow.com/questions/52034997/how-to-make-makefile-recompile-when-a-header-file-is-changed for the -MMD & -MP flags
-#Without them headers wouldn't trigger recompilation
+# Build glue for ember.
+#
+# Common invocations:
+#   make             Build bin/ember-core.so + bin/library-inject.so on the host.
+#                    Use scripts/build.sh --portable for a release-grade
+#                    binary with broader glibc compatibility.
+#   make clean       Remove all build artefacts.
+#   make install     Install onto the host (delegates to setup.sh install).
+#   make release     Build portable + package dist/ember-linux-<ver>.zip.
+#                    Same as scripts/release.sh.
+#
+# -MMD/-MP keep dependency files in sync so header edits trigger
+# recompilation, see https://stackoverflow.com/q/52034997.
 
-#Force g++ cause clang crashes on some hooks
+# Force g++; clang miscompiles a few hooks.
 CXX := g++
+.DEFAULT_GOAL := all
+STEAMCLIENT ?= $(HOME)/.local/share/Steam/steamrt64/steamclient.so
+STEAMUI ?= $(HOME)/.local/share/Steam/steamrt64/steamui.so
 
-#Default architecture to build for
-ARCH := $(shell uname -m)
-
-ifeq ($(shell echo $$CROSS_HOST),X86_64)
-	CXX := x86_64-linux-gnu-g++
-	ARCH := x86_64
-endif
-ifeq ($(shell echo $$CROSS_HOST),AArch64)
-	CXX := aarch64-linux-gnu-g++
-	ARCH := aarch64
-endif
-
-libs := $(wildcard lib/$(ARCH)/*.a)
+libs := $(wildcard lib/*.a)
 srcs := $(shell find src/ -type f -iname "*.cpp")
+objs := $(srcs:src/%.cpp=obj/%.o)
+deps := $(objs:%.o=%.d)
 
-CXXFLAGS := -O3 -flto=auto -fPIC -std=c++20 -Wall -Wextra -Wpedantic -Wno-error=format-security -D_GLIBCXX_USE_CXX11_ABI=0
-CXXFLAGS += -floop-block -fgraphite-identity -floop-parallelize-all -pipe -fomit-frame-pointer
-CXXFLAGS += $(shell pkg-config --cflags "dbus-1")
+# -fno-reorder-blocks-and-partition: keep exception landing pads in the hot
+# partition. With block partitioning (implied at -O2+), a throw's handler can
+# land in the ".cold" section and the call-site table fails to route to it, so
+# even catch(...) is bypassed and the client aborts (see config.hpp / the
+# FakeWalletBalance + malformed-config boot loops). We avoid throwing across
+# this boundary in the config path regardless, but pinning the landing pads
+# makes every remaining try/catch a reliable backstop.
+CXXFLAGS := -O3 -flto=auto -fPIC -m64 -std=c++20 \
+            -fno-reorder-blocks-and-partition \
+            -Wall -Wextra -Wpedantic -Wno-error=format-security \
+            -D_GLIBCXX_USE_CXX11_ABI=0
 
-LDFLAGS := -shared -Wl,--no-undefined -Wl,--as-needed
-LDFLAGS += $(shell pkg-config --libs "libcurl")
-LDFLAGS += $(shell pkg-config --libs "dbus-1")
-
-JOBS := $(shell nproc)
-
-#DATE := $(shell date "+%Y%m%d%H%M%S")
-DATE := $(shell cat res/version.txt)
-
-ifeq ($(shell echo $$TRACE),1)
-	CXXFLAGS += -D "TRACE"
-endif
-
-ifeq ($(shell echo $$DEBUG),1)
-	CXXFLAGS += -D "DEBUG"
-else
-	CXXFLAGS += -Wno-unused-parameter -Wno-unused-variable
-endif
+LDFLAGS := -shared -Wl,--no-undefined -lpthread -ldl
 
 ifeq ($(shell echo $$NATIVE),1)
 	CXXFLAGS += -march=native
 endif
 
-ifeq ($(ARCH),x86_64)
-	CXXFLAGS += -D "X86_64"
+# Optional speed-ups picked up if installed.
+ifeq ($(shell type ccache &> /dev/null && echo "found"),found)
+	export PATH := /usr/lib/ccache/bin:$(PATH)
 endif
-ifeq ($(ARCH),aarch64)
-	CXXFLAGS += -D "AARCH64"
+ifeq ($(shell type mold &> /dev/null && echo "found"),found)
+	LDFLAGS += -fuse-ld=mold
 endif
 
-#Speed up compilation if additional dependencies are found
-ifneq (,$(shell command -v ccache))
-	CXX := ccache $(CXX)
-endif
-#ifneq (,$(shell command -v mold))
-#	LDFLAGS += -fuse-ld=mold
-#endif
+.PHONY: all build rebuild clean install release test-ascii test-cmwire test-cmclient-loader test-clientcompat test-dlcids test-dlc-scope test-dlc-metadata test-config-path test-config-discovery test-filewatcher-burst test-provision-notice test-mtvar-contains test-synthmark test-appinfostate test-pattern-catalog test-pattern-cache test-pattern-refresh test-process-lock test-process-runtime test-atomic-file test-cache-pair test-appinfo-transaction test-appinfo-reload test-audit-symbols test-audit-policy test-memhlp-target test-memhlp-prologue test-memhlp-pic test-utils-sha test-provision-cache test-provision-refresh test-provision-result test-provision-terminal test-pending-proton test-provision-schedule test-provision-pass test-runtime-dependencies test-thread-start test-steamstub-warmup test-steamstub-launchopt test-boundedexecutor test-steamless-prewarm test-depotkey-scope test-curl-timeout test-contentserverdirectory test-manifest-index test-manifestselection test-manifeststore-io test-hotreload-inputs test-hotreload-package test-ownerqueue test-hotreload-capabilities test-libraryremoval test-pics test-prewarm-backoff test-yaml-runtime test-manifestpin-patterns test-optional-locators test-patternscan test-manifest-zip test-fakeappid-presence test-fakeappid-wiring test-ticket test-familyshare test-familyshare-wiring
+.NOTPARALLEL: clean rebuild
+.PHONY: test-library-dates test-library-dates-hook
+.PHONY: test-achievements test-achievement-scope test-stats-audit
+.PHONY: test-stats-provenance
+.PHONY: test-manifestdonor test-manifestfetch
+.PHONY: test-reconcilepin-scan
+.PHONY: test-depotkey-recv-policy
 
-FLAGSSHA := $(shell echo "$(CXXFLAGS) & $(LDFLAGS)" | sha256sum | cut -d " " -f 1)
-SLSSTEAMSO := bin/SLSsteam-$(FLAGSSHA).so
-objs := $(srcs:src/%.cpp=obj/$(FLAGSSHA)/%.o)
-deps := $(objs:%.o=%.d)
+test-manifestdonor:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -Werror \
+		tools/test_manifestdonor.cpp -o /tmp/test_manifestdonor
+	/tmp/test_manifestdonor
 
-audit-libs: embed-version #embed-version belongs to the SLSsteam.so target, yet we can't elegantly add it there. So it stays here for now
-	$(MAKE) -j $(JOBS) $(SLSSTEAMSO)
+test-manifestfetch:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -Werror \
+		tools/test_manifestfetch.cpp -o /tmp/test_manifestfetch
+	/tmp/test_manifestfetch
 
-tools:
-	$(MAKE) -j 2 schema-grabber ticket-grabber
+test-stats-provenance:
+	$(CXX) -m64 -std=c++20 -D_GLIBCXX_USE_CXX11_ABI=0 -isystem include -I src \
+		-ffunction-sections -fdata-sections tools/test_stats_provenance.cpp \
+		-Wl,--gc-sections -pthread -o /tmp/test_stats_provenance
+	/tmp/test_stats_provenance
 
-$(SLSSTEAMSO): $(objs) $(libs)
+test-familyshare: obj/sdk/protobufs/steammessages_base.pb.o
+	$(CXX) -m64 -std=c++20 -D_GLIBCXX_USE_CXX11_ABI=0 -isystem include -I src \
+		-ffunction-sections -fdata-sections tools/test_familyshare.cpp \
+		src/sdk/CNetPacket.cpp $^ lib/libprotobuf-lite.a \
+		-Wl,--gc-sections -pthread -o /tmp/test_familyshare
+	/tmp/test_familyshare
+
+test-familyshare-wiring:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -Werror \
+		tools/test_familyshare_wiring.cpp -o /tmp/test_familyshare_wiring
+	/tmp/test_familyshare_wiring
+
+test-manifest-zip:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -Werror -I src \
+		tools/test_manifest_zip.cpp src/utils/manifest_zip.cpp -ldl \
+		-o /tmp/test_manifest_zip
+	/tmp/test_manifest_zip
+
+test-achievements:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -Werror -pthread tools/test_achievements.cpp -o /tmp/test_achievements
+	/tmp/test_achievements
+
+test-achievement-scope: obj/sdk/protobufs/steammessages_clientserver_userstats.pb.o obj/sdk/protobufs/steammessages_base.pb.o
+	$(CXX) -m64 -std=c++20 -D_GLIBCXX_USE_CXX11_ABI=0 -isystem include -I src \
+		tools/test_achievement_scope.cpp src/feats/achievements.cpp src/feats/stats_policy.cpp \
+		$^ lib/libprotobuf-lite.a -pthread -o /tmp/test_achievement_scope
+	/tmp/test_achievement_scope
+
+test-fakeappid-presence: obj/sdk/protobufs/encrypted_app_ticket.pb.o \
+                          obj/sdk/protobufs/steammessages_base.pb.o \
+                          obj/sdk/protobufs/steammessages_clientserver.pb.o \
+                          obj/sdk/protobufs/steammessages_clientserver_2.pb.o
+	$(CXX) -m64 -std=c++20 -D_GLIBCXX_USE_CXX11_ABI=0 -isystem include -I src \
+		-ffunction-sections -fdata-sections tools/test_fakeappid_presence.cpp \
+		src/feats/fakeappid.cpp src/sdk/CNetPacket.cpp $^ lib/libprotobuf-lite.a \
+		-Wl,--gc-sections -pthread -o /tmp/test_fakeappid_presence
+	/tmp/test_fakeappid_presence
+
+test-fakeappid-wiring:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -Werror \
+		tools/test_fakeappid_wiring.cpp -o /tmp/test_fakeappid_wiring
+	/tmp/test_fakeappid_wiring
+
+test-ticket:
+	$(CXX) -m64 -std=c++20 -D_GLIBCXX_USE_CXX11_ABI=0 \
+		-Wall -Wextra -Wpedantic -Werror -I include -I src \
+		tools/test_ticket.cpp -o /tmp/test_ticket
+	/tmp/test_ticket
+
+test-process-runtime:
+	$(CXX) -m64 -std=c++20 -D_GLIBCXX_USE_CXX11_ABI=0 \
+		-Wall -Wextra -Wpedantic \
+		-ffunction-sections -fdata-sections -I include -I src \
+		tools/test_process_runtime.cpp src/process.cpp \
+		-Wl,--gc-sections -pthread -o /tmp/test_process_runtime
+	/tmp/test_process_runtime
+
+test-stats-audit: bin/ember-core.so
+	$(CXX) -m64 -std=c++20 -rdynamic tools/test_stats_audit.cpp -ldl -o /tmp/test_stats_audit
+	/tmp/test_stats_audit
+	LD_AUDIT='$(CURDIR)/bin/ember-core.so' /tmp/test_stats_audit audit
+
+all: build
+build: bin/ember-core.so bin/library-inject.so bin/pattern-refresh
+rebuild: clean build
+
+bin/ember-core.so: $(objs) $(libs)
 	@mkdir -p bin
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
-	ln -f "$@" "bin/SLSsteam.so"
 
-schema-grabber:
-	$(MAKE) -C tools/schema-grabber
+# Audit-side helper that redirects libcurl loading to a system copy.
+# Loaded ahead of ember-core.so via $LD_AUDIT.
+bin/library-inject.so: tools/library-inject/main.cpp
+	@mkdir -p bin
+	$(CXX) -O3 -m64 -fPIC -shared -std=c++20 $< -o $@
 
-ticket-grabber:
-	$(MAKE) -C tools/ticket-grabber
+PATTERN_PUBLIC_KEY_HEX = $(shell tr -d '[:space:]' < res/pattern-public-key.hex 2>/dev/null)
 
-embed-version:
-	$(shell ./embed-version.sh)
+# Pre-launch metadata refresher. This is a native host executable, not a
+# Steam-loaded i386 object: HTTPS, Ed25519, and cache I/O finish before Steam
+# starts and never run in LD_AUDIT preinit.
+bin/pattern-refresh: tools/pattern-refresh/main.cpp \
+                     tools/pattern-refresh/catalog.cpp \
+                     tools/pattern-refresh/catalog.hpp \
+                     src/pattern_catalog.cpp src/pattern_catalog.hpp \
+                     res/pattern-public-key.hex
+	@test -n "$(PATTERN_PUBLIC_KEY_HEX)" || { echo "missing pattern public key" >&2; exit 1; }
+	@mkdir -p bin
+	$(CXX) -O2 -std=c++20 -Wall -Wextra -Wpedantic \
+		-I src -I tools/pattern-refresh \
+		-DPATTERN_PUBLIC_KEY_HEX='"$(PATTERN_PUBLIC_KEY_HEX)"' \
+		tools/pattern-refresh/main.cpp tools/pattern-refresh/catalog.cpp \
+		src/pattern_catalog.cpp -lcurl -lcrypto -lpthread -o $@
 
 -include $(deps)
-obj/$(FLAGSSHA)/config.o: src/config.cpp res/config.yaml
+obj/update.o: src/update.cpp res/version.txt
+	$(shell ./embed-version.sh)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -isysteminclude -MMD -MP -c $< -o $@
+
+-include $(deps)
+obj/config.o: src/config.cpp res/config.yaml
 	$(shell ./embed-config.sh)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -isysteminclude -MMD -MP -c $< -o $@
 
 -include $(deps)
-obj/$(FLAGSSHA)/%.o : src/%.cpp
+obj/%.o : src/%.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -isysteminclude -MMD -MP -c $< -o $@
 
-clean-libs:
-	rm -rvf \
-		"obj/" \
-		"bin/" \
-		"zips/" \
-		"tools/ticket-grabber/bin" \
-		"tools/ticket-grabber/obj" \
-		"tools/schema-grabber/bin" \
-		"tools/schema-grabber/obj"
+clean:
+	rm -rf obj/ bin/ dist/
 
-clean-tools:
-	-$(MAKE) -C tools/schema-grabber clean
-	-$(MAKE) -C tools/ticket-grabber clean
-
-install: build
+install:
 	sh setup.sh install
 
-uninstall:
-	sh setup.sh uninstall
+# Unit test for cmwire.hpp's protobuf-backed helpers (Task 3).  Links the
+# already-compiled protobuf objects + libprotobuf-lite.a, matching the
+# main build's 32-bit + pre-C++11 ABI so the static lib is compatible.
+# The pure framing tests (Tasks 1-2) also build standalone without this:
+#   g++ -std=c++20 -I include tools/test_cmwire.cpp -o /tmp/test_cmwire
+test-cmwire: obj/sdk/protobufs/steammessages_base.pb.o \
+             obj/sdk/protobufs/steammessages_clientserver_appinfo.pb.o \
+             obj/sdk/protobufs/steammessages_clientserver_login.pb.o \
+             obj/sdk/protobufs/steammessages_clientserver.pb.o \
+             obj/sdk/protobufs/steammessages_clientserver_2.pb.o \
+             obj/sdk/protobufs/steammessages_clientserver_friends.pb.o \
+             obj/sdk/protobufs/steammessages_clientserver_userstats.pb.o \
+             obj/sdk/protobufs/encrypted_app_ticket.pb.o
+	$(CXX) -m64 -std=c++20 -D_GLIBCXX_USE_CXX11_ABI=0 -DCMWIRE_PROTOBUF \
+		-I include tools/test_cmwire.cpp $^ lib/libprotobuf-lite.a \
+		-lpthread -o /tmp/test_cmwire
+	/tmp/test_cmwire
 
-makepkg-install: build
-	-mkdir -p "$$PKGDIR/usr/share/doc/"
-	cp -rvL "docs" "$$PKGDIR/usr/share/doc/SLSsteam"
+test-cmclient-loader:
+	$(CXX) -std=c++20 -ffunction-sections -fdata-sections -I include -I src \
+		tools/test_cmclient_loader.cpp src/feats/cmclient.cpp \
+		-Wl,--gc-sections -ldl -pthread -o /tmp/test_cmclient_loader
+	/tmp/test_cmclient_loader
 
-	install -D "bin/SLSsteam.so" "$$PKGDIR/usr/lib/libSLSsteam.so"
-	install -D "res/SLSsteam.desktop" "$$PKGDIR/usr/share/applications/SLSsteam.desktop"
-	install -D "res/SLSsteam-native.desktop" "$$PKGDIR/usr/share/applications/SLSsteam-native.desktop"
-	install -D "res/logo.png" "$$PKGDIR/usr/share/pixmaps/SLSsteam.png"
+test-clientcompat:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I src -I include \
+		tools/test_clientcompat.cpp src/sdk/IClientCompat.cpp \
+		-o /tmp/test_clientcompat
+	/tmp/test_clientcompat
 
-	install -D "tools/ticket-grabber/bin/Release/net9.0/linux-x64/publish/ticket-grabber" "$$PKGDIR/usr/bin/sls-ticket-grabber"
-	install -D "tools/schema-grabber/bin/Release/net9.0/linux-x64/publish/schema-grabber" "$$PKGDIR/usr/bin/sls-schema-grabber"
+test-dlcids:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I include \
+		tools/test_dlcids.cpp -o /tmp/test_dlcids
+	/tmp/test_dlcids
 
-zips: build
-	@mkdir -p zips
-	7z a -mx9 -m9=lzma2 \
-		"zips/SLSsteam $(DATE).7z" \
-		"bin/SLSsteam.so" \
-		"setup.sh" \
-		"docs/LICENSE" \
-		"res/config.yaml" \
-		"tools/ticket-grabber/bin/Release/net9.0/linux-x64/publish/ticket-grabber" \
-		"tools/schema-grabber/bin/Release/net9.0/linux-x64/publish/schema-grabber"
+test-ascii:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -Werror -I src \
+		tools/test_ascii.cpp -o /tmp/test_ascii
+	/tmp/test_ascii
 
-	#Compatibility for Github issues
-	7z a -mx9 -m9=lzma \
-		"zips/SLSsteam $(DATE).zip" \
-		"bin/SLSsteam.so" \
-		"setup.sh" \
-		"docs/LICENSE" \
-		"res/config.yaml" \
-		"tools/ticket-grabber/bin/Release/net9.0/linux-x64/publish/ticket-grabber" \
-		"tools/schema-grabber/bin/Release/net9.0/linux-x64/publish/schema-grabber"
+test-dlc-scope:
+	$(CXX) -m64 -std=c++20 -D_GLIBCXX_USE_CXX11_ABI=0 \
+		-Wall -Wextra -Wpedantic -I src -I include \
+		tools/test_dlc_scope.cpp src/feats/dlc.cpp \
+		src/feats/managed_dlc_scope.cpp -pthread \
+		-o /tmp/test_dlc_scope
+	/tmp/test_dlc_scope
 
-zips-config:
-	7z a -mx9 -m9=lzma "zips/SLSsteam - SLSConfig $(DATE).zip" "$(HOME)/.config/SLSsteam/config.yaml"
-	#Compatibility for Github issues
-	7z a -mx9 -m9=lzma2 "zips/SLSsteam - SLSConfig $(DATE).7z" "$(HOME)/.config/SLSsteam/config.yaml"
+test-dlc-metadata:
+	$(CXX) -m64 -std=c++20 -D_GLIBCXX_USE_CXX11_ABI=0 \
+		-Wall -Wextra -Wpedantic -I include -I src \
+		tools/test_dlc_metadata.cpp src/feats/dlc_metadata.cpp \
+		lib/libyaml-cpp.a -o /tmp/test_dlc_metadata
+	/tmp/test_dlc_metadata
 
+test-config-path:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I src \
+		tools/test_config_path.cpp -o /tmp/test_config_path
+	/tmp/test_config_path
 
-clean: clean-libs clean-tools
-build: audit-libs tools
-rebuild: clean build
-release: rebuild zips
+test-config-discovery:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I src -I include \
+		tools/test_config_discovery.cpp -o /tmp/test_config_discovery
+	/tmp/test_config_discovery
+test-reconcilepin-scan:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I src \
+		tools/test_reconcilepin_scan.cpp -o /tmp/test_reconcilepin_scan
+	/tmp/test_reconcilepin_scan
 
-# Host test for the pure stplug-in parser. No Steam, no -m32.
-test-stplugin:
+test-filewatcher-burst:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -pthread -I src \
+		tools/test_filewatcher_burst.cpp -o /tmp/test_filewatcher_burst
+	/tmp/test_filewatcher_burst
+
+test-provision-notice:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I include -I src \
+		tools/test_provision_notice.cpp -o /tmp/test_provision_notice
+	/tmp/test_provision_notice
+
+test-mtvar-contains:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -pthread -I src \
+		tools/test_mtvar_contains.cpp -o /tmp/test_mtvar_contains
+	/tmp/test_mtvar_contains
+
+test-synthmark:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I src -I include \
+		tools/test_synthmark.cpp -o /tmp/test_synthmark
+	/tmp/test_synthmark
+
+test-appinfostate:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -pthread -I src -I include \
+		tools/test_appinfostate.cpp -o /tmp/test_appinfostate
+	/tmp/test_appinfostate
+
+test-pattern-catalog:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I src \
+		tools/test_pattern_catalog.cpp src/pattern_catalog.cpp \
+		-o /tmp/test_pattern_catalog
+	/tmp/test_pattern_catalog
+
+test-pattern-cache:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I src \
+		tools/test_pattern_cache.cpp src/pattern_cache.cpp \
+		-o /tmp/test_pattern_cache
+	/tmp/test_pattern_cache
+
+test-appinfo-reload:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I src \
+		tools/test_appinforeload.cpp -o /tmp/test_appinforeload
+	/tmp/test_appinforeload
+
+test-pattern-refresh:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I tools -I src \
+		tools/test_pattern_refresh.cpp tools/pattern-refresh/catalog.cpp \
+		src/pattern_catalog.cpp -lcurl -lcrypto -lpthread \
+		-o /tmp/test_pattern_refresh
+	/tmp/test_pattern_refresh
+
+test-audit-symbols:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I src \
+		tools/test_audit_symbols.cpp -o /tmp/test_audit_symbols
+	/tmp/test_audit_symbols
+
+test-audit-policy:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I src \
+		tools/test_audit_policy.cpp -o /tmp/test_audit_policy
+	/tmp/test_audit_policy
+
+test-depotkey-scope:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I include \
+		tools/test_depotkey_scope.cpp -pthread -o /tmp/test_depotkey_scope
+	/tmp/test_depotkey_scope
+
+test-depotkey-recv-policy:
 	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -Werror \
-		tools/test_stplugin.cpp src/feats/stplugin_parse.cpp -o /tmp/test_stplugin
-	/tmp/test_stplugin
+		tools/test_depotkey_recv_policy.cpp -o /tmp/test_depotkey_recv_policy
+	/tmp/test_depotkey_recv_policy
 
-# Host test for the cloud store layer (hash, protobuf codec, on-disk store).
-test-cloud:
-	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -Werror \
-		tools/test_cloud.cpp src/feats/cloudstore.cpp src/feats/cloudpb.cpp \
-		src/feats/sha256.cpp -o /tmp/test_cloud
-	/tmp/test_cloud
+test-memhlp-target:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I src -I include \
+		tools/test_memhlp_target.cpp -o /tmp/test_memhlp_target
+	/tmp/test_memhlp_target
 
-# Host test for the Cloud.* RPC handlers.
-test-cloudrpc:
-	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -Werror \
-		tools/test_cloudrpc.cpp src/feats/cloudrpc.cpp src/feats/cloudstore.cpp \
-		src/feats/cloudpb.cpp src/feats/cloudendpoint.cpp src/feats/sha256.cpp \
-		-o /tmp/test_cloudrpc
-	/tmp/test_cloudrpc
+test-memhlp-prologue:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I src -I include \
+		tools/test_memhlp_prologue.cpp -o /tmp/test_memhlp_prologue
+	/tmp/test_memhlp_prologue
 
-# Host test for the loopback blob server. Real sockets, so a wiring mistake
-# shows up here rather than inside the client.
-test-cloudhttp:
-	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -Werror -Isrc \
-		tools/test_cloudhttp.cpp tools/test_logstub.cpp src/feats/cloudhttp.cpp \
-		src/feats/cloudstore.cpp src/feats/cloudpb.cpp src/feats/cloudendpoint.cpp \
-		src/feats/sha256.cpp -o /tmp/test_cloudhttp
-	/tmp/test_cloudhttp
+test-memhlp-pic:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I src -I include \
+		tools/test_memhlp_pic.cpp -o /tmp/test_memhlp_pic
+	/tmp/test_memhlp_pic
 
-.PHONY: \
-	test-stplugin \
-	test-cloud \
-	test-cloudrpc \
-	test-cloudhttp \
-	audit-libs \
-	tools \
-	schema-grabber \
-	ticket-grabber \
-	embed-version \
-	clean-libs \
-	clean-tools \
-	install \
-	uninstall \
-	zips \
-	zips-config \
-	clean \
-	build \
-	rebuild \
-	release
+test-utils-sha:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I src \
+		tools/test_utils_sha.cpp src/utils.cpp -o /tmp/test_utils_sha
+	/tmp/test_utils_sha
+
+test-provision-cache:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I src \
+		tools/test_provision_cache.cpp -o /tmp/test_provision_cache
+	/tmp/test_provision_cache
+
+test-provision-refresh:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I src \
+		tools/test_provision_refresh.cpp -o /tmp/test_provision_refresh
+	/tmp/test_provision_refresh
+
+test-provision-result:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I src \
+		tools/test_provision_result.cpp -o /tmp/test_provision_result
+	/tmp/test_provision_result
+
+test-provision-terminal:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I src \
+		tools/test_provision_terminal.cpp src/feats/provision_terminal.cpp \
+		-o /tmp/test_provision_terminal
+	/tmp/test_provision_terminal
+
+test-pending-proton:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I include \
+		tools/test_pending_proton.cpp -o /tmp/test_pending_proton
+	/tmp/test_pending_proton
+
+test-provision-schedule:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I src \
+		tools/test_provision_schedule.cpp -o /tmp/test_provision_schedule
+	/tmp/test_provision_schedule
+
+test-provision-pass:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I src \
+		tools/test_provision_pass.cpp -pthread \
+		-o /tmp/test_provision_pass
+	/tmp/test_provision_pass
+
+test-runtime-dependencies:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -ffunction-sections -fdata-sections -I src \
+		-c src/runtime_dependencies.cpp -o /tmp/runtime_dependencies.o
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -ffunction-sections -fdata-sections -I src \
+		tools/test_runtime_dependencies.cpp /tmp/runtime_dependencies.o \
+		-Wl,--gc-sections -o /tmp/test_runtime_dependencies
+	/tmp/test_runtime_dependencies
+
+test-thread-start:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I src \
+		tools/test_thread_start.cpp -o /tmp/test_thread_start
+	/tmp/test_thread_start
+
+test-steamstub-warmup:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I src \
+		tools/test_steamstub_warmup.cpp -o /tmp/test_steamstub_warmup
+	/tmp/test_steamstub_warmup
+
+test-steamstub-launchopt:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I src \
+		tools/test_steamstub_launchopt.cpp -o /tmp/test_steamstub_launchopt
+	/tmp/test_steamstub_launchopt
+
+test-boundedexecutor:
+	$(CXX) -std=c++20 -pthread -Wall -Wextra -Wpedantic -Werror \
+		tools/test_boundedexecutor.cpp -o /tmp/test_boundedexecutor
+	/tmp/test_boundedexecutor
+
+test-steamless-prewarm:
+	bash scripts/test-steamless-prewarm.sh
+
+test-curl-timeout:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I src \
+		tools/test_curl_timeout.cpp src/curl.cpp -ldl -pthread \
+		-o /tmp/test_curl_timeout
+	/tmp/test_curl_timeout
+
+test-contentserverdirectory:
+	$(CXX) -m64 -std=c++20 -D_GLIBCXX_USE_CXX11_ABI=0 \
+		-Wall -Wextra -Wpedantic -Werror -I include -I src \
+		tools/test_contentserverdirectory.cpp src/utils/contentserverdirectory.cpp \
+		lib/libyaml-cpp.a -o /tmp/test_contentserverdirectory
+	/tmp/test_contentserverdirectory
+
+test-manifest-index:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I src \
+		tools/test_manifest_index.cpp -o /tmp/test_manifest_index
+	/tmp/test_manifest_index
+
+test-manifestselection:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -Werror -I src \
+		tools/test_manifestselection.cpp -o /tmp/test_manifestselection
+	/tmp/test_manifestselection
+
+test-manifeststore-io:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I src \
+		tools/test_manifeststore_io.cpp -o /tmp/test_manifeststore_io
+	/tmp/test_manifeststore_io
+
+test-hotreload-inputs:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I include -I src \
+		tools/test_hotreload_inputs.cpp src/feats/provision_terminal.cpp \
+		-o /tmp/test_hotreload_inputs
+	/tmp/test_hotreload_inputs
+
+test-hotreload-package:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic \
+		tools/test_hotreload_package.cpp -o /tmp/test_hotreload_package
+	/tmp/test_hotreload_package
+
+test-ownerqueue:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -pthread \
+		tools/test_ownerqueue.cpp -o /tmp/test_ownerqueue
+	/tmp/test_ownerqueue
+
+test-hotreload-capabilities:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I src \
+		tools/test_hotreload_capabilities.cpp -o /tmp/test_hotreload_capabilities
+	/tmp/test_hotreload_capabilities
+
+test-libraryremoval: obj/feats/libraryremoval.o
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I src \
+		tools/test_libraryremoval.cpp -o /tmp/test_libraryremoval
+	/tmp/test_libraryremoval
+	@if nm -C obj/feats/libraryremoval.o | grep -E 'google::protobuf|RepeatedField'; then \
+		echo "library removal must not mutate Steam protobufs across the audit namespace" >&2; \
+		exit 1; \
+	fi
+
+test-library-dates:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -Werror -I src \
+		tools/test_library_dates.cpp src/feats/librarydates.cpp -pthread \
+		-o /tmp/test_library_dates
+	/tmp/test_library_dates
+
+test-library-dates-hook:
+	$(CXX) -m64 -std=c++20 -D_GLIBCXX_USE_CXX11_ABI=0 \
+		-fno-reorder-blocks-and-partition -ffunction-sections -fdata-sections \
+		-Wall -Wextra -Wpedantic -isystem include -I src \
+		tools/test_library_dates_hook.cpp src/feats/apps.cpp src/feats/librarydates.cpp \
+		-Wl,--gc-sections -pthread -o /tmp/test_library_dates_hook
+	/tmp/test_library_dates_hook
+
+test-pics:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I include -I src \
+		tools/test_pics.cpp src/feats/provision_terminal.cpp -o /tmp/test_pics
+	/tmp/test_pics
+
+test-prewarm-backoff:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I src \
+		tools/test_prewarm_backoff.cpp -o /tmp/test_prewarm_backoff
+	/tmp/test_prewarm_backoff
+
+test-process-lock:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I src \
+		tools/test_process_lock.cpp -o /tmp/test_process_lock
+	/tmp/test_process_lock
+
+test-atomic-file:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -DATOMIC_FILE_TESTING -I src \
+		tools/test_atomic_file.cpp -o /tmp/test_atomic_file
+	/tmp/test_atomic_file
+
+test-cache-pair:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I src \
+		tools/test_cache_pair.cpp -o /tmp/test_cache_pair
+	/tmp/test_cache_pair
+
+test-yaml-runtime:
+	$(CXX) -m64 -std=c++20 -D_GLIBCXX_USE_CXX11_ABI=0 -I include \
+		tools/test_yaml_runtime.cpp lib/libyaml-cpp.a -o /tmp/test_yaml_runtime
+	/tmp/test_yaml_runtime
+
+# Non-LTO 32-bit object so the host linker can link the transaction test
+# without choking on LTO bytecode from a different toolchain version.
+obj/feats/appinfo_vdf_test.o: src/feats/appinfo_vdf.cpp $(deps_early)
+	@mkdir -p obj/feats
+	$(CXX) -O2 -fno-lto -fPIC -m64 -std=c++20 -fno-reorder-blocks-and-partition \
+		-Wall -Wextra -Wpedantic -Wno-error=format-security \
+		-D_GLIBCXX_USE_CXX11_ABI=0 -DAPPINFO_VDF_TESTING \
+		-I include -isysteminclude -MMD -MP \
+		-c src/feats/appinfo_vdf.cpp -o obj/feats/appinfo_vdf_test.o
+
+test-appinfo-transaction: obj/feats/appinfo_vdf_test.o obj/log.o obj/config.o \
+		obj/globals.o obj/filewatcher.o obj/update.o obj/api.o \
+		obj/feats/depotkey.o obj/feats/manifestid.o obj/feats/librarydates.o \
+		obj/ownerwork.o obj/sdk/protobufs/steammessages_clientserver_appinfo.pb.o \
+		obj/sdk/protobufs/steammessages_base.pb.o
+	$(CXX) -m64 -std=c++20 -D_GLIBCXX_USE_CXX11_ABI=0 -DAPPINFO_VDF_TESTING \
+		-I include -isysteminclude tools/test_appinfo_transaction.cpp \
+		obj/feats/appinfo_vdf_test.o \
+		$(filter-out obj/feats/appinfo_vdf_test.o,$(filter obj/%.o,$^)) \
+		lib/libyaml-cpp.a lib/libprotobuf-lite.a -lcrypto -lpthread -ldl \
+		-o /tmp/test_appinfo_transaction
+	/tmp/test_appinfo_transaction
+
+# Live integration harness for the native CM product-info client (talks
+# to real Valve CMs — NOT a unit test).  Links cmclient + its deps.
+test-cmclient-live: build
+	$(CXX) $(CXXFLAGS) -DCMWIRE_PROTOBUF \
+		-I include -isysteminclude tools/test_cmclient_live.cpp \
+		obj/feats/cmclient.o obj/log.o obj/config.o obj/globals.o obj/update.o obj/filewatcher.o \
+		obj/feats/librarydates.o \
+		obj/sdk/protobufs/steammessages_base.pb.o \
+		obj/sdk/protobufs/steammessages_clientserver_appinfo.pb.o \
+		obj/sdk/protobufs/steammessages_clientserver_login.pb.o \
+		obj/sdk/protobufs/steammessages_clientserver.pb.o \
+		obj/sdk/protobufs/steammessages_clientserver_2.pb.o \
+		obj/sdk/protobufs/steammessages_clientserver_friends.pb.o \
+		obj/sdk/protobufs/steammessages_clientserver_userstats.pb.o \
+		obj/sdk/protobufs/encrypted_app_ticket.pb.o \
+		lib/libprotobuf-lite.a lib/libyaml-cpp.a \
+		-lpthread -ldl -lcurl -o /tmp/test_cmclient_live
+
+test-manifestpin-patterns:
+	$(CXX) -std=c++20 tools/test_manifestpin_patterns.cpp \
+		-o /tmp/test_manifestpin_patterns
+	/tmp/test_manifestpin_patterns "$(STEAMCLIENT)"
+
+# The two optional locators whose failure only degrades a feature, so a drift
+# after a client update would otherwise pass unnoticed.
+#
+# Point PREV_STEAMCLIENT/PREV_STEAMUI at the previous client's modules to also
+# gate the transport: a relaxed signature can be unique on the new build and
+# ambiguous (or land on a neighbouring field) on the one users still run, which
+# a single-build check cannot see.
+test-patternscan:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I src \
+		tools/test_patternscan.cpp -o /tmp/test_patternscan
+	/tmp/test_patternscan
+
+test-optional-locators:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -I src \
+		tools/test_optional_locators.cpp -o /tmp/test_optional_locators
+	/tmp/test_optional_locators "$(STEAMCLIENT)" "$(STEAMUI)" src/patterns.cpp
+ifneq ($(strip $(PREV_STEAMCLIENT)$(PREV_STEAMUI)),)
+	@test -n "$(strip $(PREV_STEAMCLIENT))" && test -n "$(strip $(PREV_STEAMUI))" \
+		|| { echo "set both PREV_STEAMCLIENT and PREV_STEAMUI" >&2; exit 2; }
+	@echo "==> previous client transport check"
+	/tmp/test_optional_locators "$(PREV_STEAMCLIENT)" "$(PREV_STEAMUI)" src/patterns.cpp
+endif
+
+release:
+	bash scripts/release.sh

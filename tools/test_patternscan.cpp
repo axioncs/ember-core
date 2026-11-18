@@ -1,0 +1,172 @@
+
+
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <cstdlib>
+#include <string>
+#include <vector>
+#include <csignal>
+#include <sys/mman.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#include "../src/pattern_scan.hpp"
+
+using lm_address_t = uintptr_t;
+using lm_byte_t    = uint8_t;
+
+enum { LM_PROT_R = 1 << 0, LM_PROT_W = 1 << 1, LM_PROT_X = 1 << 2,
+       LM_PROT_XR = LM_PROT_X | LM_PROT_R };
+
+static int g_fail = 0;
+#define CHECK(cond, msg) do { \
+    if (cond) { printf("  PASS: %s\n", msg); } \
+    else      { printf("  FAIL: %s\n", msg); g_fail++; } } while (0)
+
+static std::vector<int16_t> patternToBytes(const char* pattern)
+{
+    auto bytes = std::vector<int16_t>();
+    char* start = const_cast<char*>(pattern);
+    char* end   = start + strlen(pattern);
+    while (start < end) {
+        if (*start == '?')      bytes.emplace_back(-1);
+        else if (*start != ' ') bytes.emplace_back(std::strtoul(start, &start, 16));
+        start++;
+    }
+    return bytes;
+}
+
+static void scan_old(const std::vector<int16_t>& bytes, lm_address_t b, lm_address_t e)
+{
+    for (lm_address_t cur = b; cur < e; cur++)
+        for (unsigned i = 0; i < bytes.size(); i++) {
+            if (bytes.at(i) == -1) continue;
+            lm_address_t a = cur + i;
+            if (a > e) break;
+            if (*reinterpret_cast<lm_byte_t*>(a) != bytes.at(i)) break;
+        }
+}
+
+static lm_address_t scan_fixed(const std::vector<int16_t>& bytes, lm_address_t b, lm_address_t e)
+{
+    lm_address_t addr = (lm_address_t)-1;
+    const size_t n = bytes.size();
+    if (n == 0 || e - b < n) return addr;
+    for (lm_address_t cur = b; cur + n <= e; cur++) {
+        bool found = true;
+        for (unsigned i = 0; i < n; i++) {
+            if (bytes.at(i) == -1) continue;
+            if (*reinterpret_cast<lm_byte_t*>(cur + i) != bytes.at(i)) { found = false; break; }
+        }
+        if (found) addr = cur;
+    }
+    return addr;
+}
+
+struct Layout { uint8_t* p; size_t pg; lm_address_t base, end; };
+static Layout make_layout()
+{
+    size_t pg = sysconf(_SC_PAGESIZE);
+    uint8_t* p = (uint8_t*)mmap(nullptr, 2*pg, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) { perror("mmap"); exit(2); }
+    memset(p, 0xCC, pg);
+    if (mprotect(p + pg, pg, PROT_NONE) != 0) { perror("mprotect"); exit(2); }
+    return Layout{ p, pg, (lm_address_t)p, (lm_address_t)(p + pg) };
+}
+
+template <class F> static int child_signal(F fn)
+{
+    pid_t pid = fork();
+    if (pid == 0) { fn(); _exit(0); }
+    int st = 0; waitpid(pid, &st, 0);
+    return WIFSIGNALED(st) ? WTERMSIG(st) : 0;
+}
+
+int main()
+{
+    printf("[1] segment filter rejects data regions (fix requires XR == X|R)\n");
+    CHECK(((LM_PROT_R | LM_PROT_X) & LM_PROT_XR) == LM_PROT_XR, "r-xp (code) is scanned");
+    CHECK(((LM_PROT_R | LM_PROT_W) & LM_PROT_XR) != LM_PROT_XR, "rw-p (data) is NOT scanned");
+    CHECK((LM_PROT_R & LM_PROT_XR) != LM_PROT_XR,               "r--p (data) is NOT scanned");
+    CHECK((0u & LM_PROT_XR) != LM_PROT_XR,                      "---p (guard) is NOT scanned");
+
+    auto L = make_layout();
+    L.p[L.pg - 1] = 0xAB;
+    std::string pat; for (int i = 0; i < 52; i++) pat += (i ? " AB" : "AB");
+    auto bytes = patternToBytes(pat.c_str());
+
+    printf("[2] boundary safety at a PROT_NONE guard page (pattern %zu bytes)\n", bytes.size());
+    int sigOld = child_signal([&]{ scan_old(bytes, L.base, L.end); });
+    CHECK(sigOld == SIGSEGV, "old logic faults at the boundary (confirms the hazard)");
+
+    int sigNew = child_signal([&]{ scan_fixed(bytes, L.base, L.end); });
+    CHECK(sigNew == 0, "fixed logic does NOT read into the guard page");
+
+    printf("[3] fixed scan still finds a pattern fully inside the segment\n");
+    uint8_t needle[4] = { 0xDE, 0xAD, 0xBE, 0xEF };
+    memcpy(L.p + 100, needle, 4);
+    auto nb = patternToBytes("DE AD BE EF");
+    lm_address_t hit = scan_fixed(nb, L.base, L.end);
+    CHECK(hit == L.base + 100, "match found at the expected offset");
+
+    auto wb = patternToBytes("DE ? BE EF");
+    CHECK(scan_fixed(wb, L.base, L.end) == L.base + 100, "wildcard match works");
+
+    printf("[4] optimized scan keeps first-match and duplicate-sweep contracts\n");
+    memcpy(L.p + 200, needle, 4);
+    auto optimizedFirst = MemHlp::scanPatternRange(nb, L.base, L.end, false);
+    CHECK(optimizedFirst.address == L.base + 100, "normal scan returns the first match");
+    CHECK(optimizedFirst.matches == 1, "normal scan stops after the first match");
+
+    auto optimizedFull = MemHlp::scanPatternRange(nb, L.base, L.end, true);
+    CHECK(optimizedFull.address == L.base + 200, "extended scan preserves the last resolved match");
+    CHECK(optimizedFull.matches == 2, "extended scan counts duplicate matches");
+
+    auto leadingWildcard = patternToBytes("? 11 22 33");
+    uint8_t wildcardNeedle[4] = { 0x44, 0x11, 0x22, 0x33 };
+    memcpy(L.p + 300, wildcardNeedle, 4);
+    memcpy(L.p + 400, wildcardNeedle, 4);
+    auto wildcardFirst = MemHlp::scanPatternRange(leadingWildcard, L.base, L.end, false);
+    CHECK(wildcardFirst.address == L.base + 300, "memchr anchor may follow a leading wildcard");
+
+    auto allWildcards = patternToBytes("? ? ?");
+    auto wildcardSweep = MemHlp::scanPatternRange(allWildcards, L.base, L.base + 3, false);
+    CHECK(wildcardSweep.address == L.base, "all-wildcard patterns use the safe fallback");
+
+    printf("[5] module-wide accumulation refuses an ambiguous signature\n");
+    MemHlp::PatternScanTotal none;
+    CHECK(!none.resolved(), "no match does not resolve");
+    MemHlp::PatternScanTotal single;
+    MemHlp::accumulateScan(single, MemHlp::PatternScanRangeResult{L.base + 100, 1});
+    CHECK(single.resolved(), "exactly one match resolves");
+    CHECK(single.address == L.base + 100, "the resolved address is the match");
+    MemHlp::PatternScanTotal twoInOneRange;
+    MemHlp::accumulateScan(twoInOneRange, MemHlp::PatternScanRangeResult{L.base + 200, 2});
+    CHECK(!twoInOneRange.resolved(), "two matches in one range do not resolve");
+    MemHlp::PatternScanTotal acrossRanges;
+    MemHlp::accumulateScan(acrossRanges, MemHlp::PatternScanRangeResult{L.base + 100, 1});
+    MemHlp::accumulateScan(acrossRanges, MemHlp::PatternScanRangeResult{L.base + 900, 1});
+    CHECK(!acrossRanges.resolved(), "one match in each of two ranges does not resolve");
+    CHECK(acrossRanges.matches == 2, "matches accumulate across ranges");
+    MemHlp::PatternScanTotal skipsEmpty;
+    MemHlp::accumulateScan(skipsEmpty, MemHlp::PatternScanRangeResult{});
+    MemHlp::accumulateScan(skipsEmpty, MemHlp::PatternScanRangeResult{L.base + 300, 1});
+    CHECK(skipsEmpty.resolved() && skipsEmpty.address == L.base + 300,
+          "an empty range never contributes an address");
+
+    printf("[6] convergent relative call sites are not ambiguity\n");
+    CHECK(!MemHlp::convergedTarget({}).has_value(), "no target does not converge");
+    CHECK(MemHlp::convergedTarget({0x1404160}).value_or(0) == 0x1404160,
+          "a single target converges on itself");
+    CHECK(MemHlp::convergedTarget({0x1404160, 0x1404160, 0x1404160}).value_or(0)
+              == 0x1404160,
+          "repeated identical targets converge");
+    CHECK(!MemHlp::convergedTarget({0x1404160, 0x1404160, 0x1404170}).has_value(),
+          "one differing target defeats convergence");
+    CHECK(MemHlp::kMaxConvergenceCandidates >= 20,
+          "the candidate cap admits the known 20-call-site locator");
+
+    printf(g_fail ? "\nFAILED (%d)\n" : "\nOK\n", g_fail);
+    return g_fail ? 1 : 0;
+}

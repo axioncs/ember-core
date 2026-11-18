@@ -1,45 +1,60 @@
 #pragma once
 
-#include "types.hpp"
+#include "steam.hpp"
 
-#include "protobufs/enums_clientserver.pb.h"
 #include "protobufs/steammessages_base.pb.h"
 #include "protobufs/encrypted_app_ticket.pb.h"
 #include "protobufs/steammessages_clientserver.pb.h"
 #include "protobufs/steammessages_clientserver_2.pb.h"
 #include "protobufs/steammessages_clientserver_appinfo.pb.h"
 #include "protobufs/steammessages_clientserver_friends.pb.h"
-#include "protobufs/steammessages_clientserver_login.pb.h"
 #include "protobufs/steammessages_clientserver_userstats.pb.h"
-#include "protobufs/steammessages_player.steamclient.pb.h"
 
 #include <cstdint>
 
+enum EMsgType : EMsg
+{
+	EMSG_SERVICE_METHOD = 146,
+	EMSG_SERVICE_METHOD_RESPONSE = 147,
+	EMSG_GAMESPLAYED_NO_DATABLOB = 715,
+	EMSG_GAMESPLAYED = 742,
+	EMSG_REQUEST_USERSTATS = 818,
+	EMSG_REQUEST_USERSTATS_RESPONSE = 819,
+	EMSG_APPOWNERSHIPTICKET_RESPONSE = 858,
+
+	EMSG_GET_DEPOT_DECRYPTION_KEY = 5438,
+	EMSG_GET_DEPOT_DECRYPTION_KEY_RESPONSE = 5439,
+	EMSG_ENCRYPTED_APPTICKET_RESPONSE = 5527,
+	EMSG_WALLET_INFO_UPDATE = 5528,
+	EMSG_GAMESPLAYED_WITH_DATABLOB = 5410,
+	EMSG_EMAIL_ADDRESS_INFO = 5456,
+	EMSG_RICH_PRESENCE_UPLOAD = 7501,
+	EMSG_PICS_PRODUCTINFO_REQUEST = 8903,
+	EMSG_PICS_PRODUCTINFO_RESPONSE = 8904,
+	EMSG_PICS_ACCESSTOKEN_RESPONSE = 8906,
+	EMSG_PICS_CHANGES_RESPONSE = 8902,
+	EMSG_SHARED_LIBRARY_STOP_PLAYING = 9406,
+};
 
 enum EGameFlags
 {
-	//1 << 0 is set for spacewar, not other mp games. idk
-	k_EGameFlagJoinable = 1 << 1,
-	k_EGameFlagMultiplayer = 1 << 13,
+
+	EGAMEFLAG_JOINABLE = 1 << 1,
+	EGAMEFLAG_MULTIPLAYER = 1 << 13,
 };
 
-SDK_Class CProtoBufMsgBase
+class CProtoBufMsgBase
 {
 public:
-	uint8_t __pad0x8[0x28];			//0x0
-	uint32_t type;					//0x28 - It's actually EMsg, but those get genned as int which is unreliable at best
-	uint8_t __pad0x2C[0x4];			//0x2C
-	void* hdr;						//0x30
-	void* __pBody;					//0x38
-	uint8_t __pad0x40[0x10];		//0x40
-	
-	constexpr EMsg getProtoBufType() const
-	{
-		return static_cast<EMsg>(type & ~PROTOBUF_TYPE_MASK);
-	}
-	
+	char __pad_0x0[0x14];
+	uint16_t type;
+	char __pad_0x16[0x6];
+	CMsgProtoBufHeader* header;
+	void* __pBody;
+	char __pad_0x24[0x8];
+
 	template<typename T> constexpr T* getBody() const
 	{
 		return reinterpret_cast<T*>(__pBody);
 	}
-}; //0x50
+};

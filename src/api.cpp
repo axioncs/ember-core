@@ -1,280 +1,141 @@
 #include "api.hpp"
 
+#include "sdk/IClientAppManager.hpp"
+
+#include "afftrace.hpp"
 #include "config.hpp"
 #include "filewatcher.hpp"
-#include "lua.hpp"
+#include "ownerwork.hpp"
+#include "runtimedir.hpp"
 #include "utils.hpp"
 
-#include <cerrno>
-#include <mutex>
-#include <sstream>
+#include <cstdlib>
+#include <fcntl.h>
+#include <ios>
+#include <unistd.h>
 
-
-namespace SLSAPI
+namespace EMBERAPI
 {
 
+	std::string contractPath;
+	const char* path = "";
 	std::fstream fstream;
-	std::unique_ptr<CFileWatcher> watcher;
-	bool initialized;
-
-	std::mutex cmdMutex;
-
-	std::vector<CompatOp_t> compatOps;
-	std::vector<LibraryOp_t> libraryOps;
+	CFileWatcher* watcher;
 }
 
-bool SLSAPI::isEnabled()
+bool EMBERAPI::isEnabled()
 {
-	return g_config.api.copy() && initialized;
+	return g_config.api.get() && fstream.is_open();
 }
 
-void SLSAPI::onFileChange(const std::filesystem::path& path, __attribute__((unused)) const int eventMask)
+void EMBERAPI::onFileChange()
 {
-	//Hot reload support :)
+
+	auto watchSpan = AffTrace::watchSpan(AffTrace::Src::Api);
+
 	if (!isEnabled())
 	{
 		return;
 	}
 
-	//Reopen stream, since it gets invalidated when our file gets replaced
-	fstream.open(path, std::fstream::in);
-
+	fstream.close();
+	{
+		const int probe = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+		if (probe < 0)
+		{
+			g_pLog->info("API contract file could not be reopened -> channel closed\n");
+			return;
+		}
+		const bool ok = RuntimeDir::descriptorIsPrivate(probe);
+		close(probe);
+		if (!ok)
+		{
+			g_pLog->info("API contract file is no longer private -> channel closed\n");
+			return;
+		}
+	}
+	fstream.open(path);
 	if (!fstream.is_open())
 	{
-		LOG_ERROR("Failed to open %s for parsing the next cmd!\n", path.c_str());
+		g_pLog->info("API contract file could not be reopened for IO -> channel closed\n");
 		return;
 	}
 
-	const auto content = std::string(std::istreambuf_iterator(fstream), {});
+	char cmd[128];
+	fstream.getline(cmd, sizeof(cmd));
 
-	fstream.close();
+	g_pLog->debug("API Running %s\n", cmd);
 
-	const auto cmds = Utils::strsplit(content, "\n");
-	for (const auto& cmd : cmds)
+	auto split = Utils::strsplit(cmd, "|");
+
+	if (split.size() > 2 && split[0] == "install")
 	{
-		parseCmd(cmd);
+		try
+		{
+			uint32_t appId = std::strtoul(split[1].c_str(), nullptr, 10);
+			uint32_t library = std::strtoul(split[2].c_str(), nullptr, 10);
+
+			if (!g_pClientAppManager)
+			{
+				g_pLog->info("API g_pClientAppManager is nullptr! Aborting...\n");
+				return;
+			}
+
+			g_pLog->info("API Installing %s to %s\n", split[1].c_str(), split[2].c_str());
+
+			const auto mode = OwnerWork::submitInstallApp(appId, library);
+			g_pLog->debug("API install request dispatched %s\n", OwnerWork::modeName(mode));
+		}
+		catch(...)
+		{
+			g_pLog->info("API Failed to parse %s or %s!\n", split[1].c_str(), split[2].c_str());
+		}
 	}
 }
 
-void SLSAPI::parseCmd(const std::string& cmd)
+void EMBERAPI::init()
 {
-	LOG_DEBUG("API Running %s\n", cmd.c_str());
 
-	const auto split = Utils::strsplit(cmd, "\\|");
-
-	const std::lock_guard guard(cmdMutex);
-
-	//Compatibility Manager
-	if (split[0] == "getcompat" && split.size() > 1)
+	const std::string dir = RuntimeDir::resolveBase(getenv("XDG_RUNTIME_DIR"),
+	                                                getenv("HOME"));
+	if (dir.empty() || !RuntimeDir::ensureDir(dir))
 	{
-		AppId_t appId;
-		if (!Utils::tryConvertToNumber(split[1].c_str(), appId))
+		g_pLog->info("API could not prepare a private runtime directory -> API unavailable\n");
+		return;
+	}
+
+	contractPath = dir + "/api";
+	path = contractPath.c_str();
+
+	int fd = open(path, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+	if (fd < 0)
+	{
+		fd = open(path, O_RDWR | O_NOFOLLOW | O_CLOEXEC);
+		if (fd >= 0 && !RuntimeDir::descriptorIsPrivate(fd))
 		{
-			LOG_ERROR("Failed to get compat for %s (not a number)!\n", split[1].c_str());
-			return;
+			g_pLog->info("API contract file is not private -> replacing it\n");
+			close(fd);
+			unlink(path);
+			fd = open(path, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
 		}
-
-		compatOps.emplace_back(CompatOp_t { CompatOp_t::OpType::Get, appId, "" } );
 	}
-
-	else if (split[0] == "setcompat" && split.size() > 1)
+	if (fd < 0)
 	{
-		AppId_t appId;
-		if (!Utils::tryConvertToNumber(split[1].c_str(), appId))
-		{
-			LOG_ERROR("Failed to set compat for %s (not a number)!\n", split[1].c_str());
-			return;
-		}
-
-		compatOps.emplace_back(CompatOp_t { CompatOp_t::OpType::Set, appId, split.size() > 2 ? split[2].c_str() : "" } );
+		g_pLog->info("API could not open its contract file -> API unavailable\n");
+		return;
 	}
+	close(fd);
 
-	//Application Manager
-	else if (split[0] == "dumplibraries")
-	{
-		libraryOps.emplace_back(LibraryOp_t { LibraryOp_t::OpType::Dump, 0, 0 } );
-	}
-
-	else if (split[0] == "install" && split.size() > 2)
-	{
-		AppId_t appId;
-		uint32_t library;
-
-		if (!Utils::tryConvertToNumber(split[1].c_str(), appId))
-		{
-			LOG_ERROR("Failed to install %s (not a number)!\n", split[1].c_str());
-			return;
-		}
-
-		if (!Utils::tryConvertToNumber(split[2].c_str(), library))
-		{
-			LOG_ERROR("Failed to install %u to %s (not a number)!\n", appId, split[2].c_str());
-			return;
-		}
-
-		libraryOps.emplace_back(LibraryOp_t { LibraryOp_t::OpType::Install, appId, library } );
-	}
-
-	else if (split[0] == "uninstall" && split.size() > 1)
-	{
-		AppId_t appId;
-		if (!Utils::tryConvertToNumber(split[1].c_str(), appId))
-		{
-			LOG_ERROR("Failed to uninstall %s (not a number)!\n", split[1].c_str());
-			return;
-		}
-
-		libraryOps.emplace_back(LibraryOp_t { LibraryOp_t::OpType::Uninstall, appId, 0 } );
-	}
-
-	// Lua
-	else if (split[0] == "reloadlua")
-	{
-		Lua::init();
-		LOG_API("Ran reloadlua!\n");
-	}
-}
-
-void SLSAPI::init()
-{
-	fstream = std::fstream(PATH, std::fstream::in | std::fstream::out | std::fstream::trunc); //Open for reading, writing and also delete contents
-
+	fstream = std::fstream(path, std::ios::in | std::ios::out);
 	if (!fstream.is_open())
 	{
-		LOG_NOTIFYWARN("Failed to create %s (%s)!\n API will be unavailable", PATH, strerror(errno));
+		g_pLog->info("API contract file could not be opened for IO -> API unavailable\n");
 		return;
 	}
 
-	//Close stream, onFileChange reopens then closes it for us
-	fstream.close();
-
-	watcher = std::make_unique<CFileWatcher>(onFileChange);
-	const int fd = watcher->addFile(PATH);
-	if (fd == -1)
-	{
-		LOG_NOTIFYWARN("Failed to watch %s!\n API will be unavailable", PATH);
-		return;
-	}
-
-	initialized = true;
-
+	watcher = new CFileWatcher(onFileChange);
+	watcher->addFile(path);
 	watcher->start();
-	LOG_DEBUG("SLSsteam API initialized!\n");
-}
 
-void SLSAPI::runCompatOps()
-{
-	const auto user = g_pSteamEngine->getUser();
-	if (!user)
-	{
-		return;
-	}
-
-	const auto compat = user->getClientCompat();
-
-	while (compatOps.size())
-	{
-		const auto op = compatOps.begin();
-
-		switch(op->type)
-		{
-			case CompatOp_t::OpType::Get:
-			{
-				if (!compat->isCompatToolEnabled(op->appId))
-				{
-					LOG_API("Get compatibility tool for %u: Compatibility tool is disabled!\n", op->appId);
-					break;
-				}
-
-				const char* name = compat->getCompatToolName(op->appId);
-				const char* displayName = compat->getDisplayName(name);
-
-				LOG_API("Get compatibility tool for %u: \"%s\" (%s)\n", op->appId, displayName, name);
-
-				break;
-			}
-
-			case CompatOp_t::OpType::Set:
-			{
-				//Steam calls them with the same values
-				compat->specifyCompatTool(op->appId, op->tool.c_str(), "", 250);
-				LOG_API("Set compatibility tool for %u to %s\n", op->appId, op->tool.c_str());
-
-				break;
-			}
-		}
-
-
-		compatOps.erase(op);
-	}
-}
-
-void SLSAPI::runInstallOps()
-{
-	const auto usr = g_pSteamEngine->getUser();
-	if (!usr)
-	{
-		return;
-	}
-
-	const auto appManager = usr->getAppManager();
-
-	while (libraryOps.size())
-	{
-		const auto op = libraryOps.begin();
-
-		switch(op->type)
-		{
-			case LibraryOp_t::OpType::Dump:
-			{
-				const uint32_t num = appManager->getNumLibraryFolders();
-				char pathBuf[0x1000]; //Same size steam passes
-				char labelBuf[0x80]; //Same size steam passes
-				
-				std::ostringstream outSS;
-				for (uint32_t i = 0; i < num; i++)
-				{
-					uint32_t pathLen = appManager->getLibraryFolderPath(i, pathBuf, sizeof(pathBuf));
-					uint32_t labelLen = appManager->getLibraryFolderLabel(i, labelBuf, sizeof(labelBuf));
-
-					if (labelLen)
-					{
-						LOG_API("Library \"%s\" at \"%s\" has index %u\n", std::string(labelBuf, labelLen).c_str(), std::string(pathBuf, pathLen).c_str(), i);
-					}
-					else
-					{
-						LOG_API("Library at \"%s\" has index %u\n", std::string(pathBuf, pathLen).c_str(), i);
-					}
-				}
-
-				break;
-			}
-
-			case LibraryOp_t::OpType::Install:
-			{
-				appManager->installApp(op->appId, op->libraryIndex);
-				LOG_API("Installed %u to %u\n", op->appId, op->libraryIndex);
-
-				break;
-			}
-
-			case LibraryOp_t::OpType::Uninstall:
-			{
-				appManager->uninstallApp(op->appId);
-				LOG_API("Uninstalled %u\n", op->appId);
-
-				break;
-			}
-		}
-
-		libraryOps.erase(op);
-	}
-}
-
-void SLSAPI::runIPCFrame()
-{
-	const std::lock_guard guard(cmdMutex);
-
-	runCompatOps();
-	runInstallOps();
+	g_pLog->debug("ember API initialized at %s\n", path);
 }

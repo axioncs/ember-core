@@ -1,172 +1,327 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+
 
 #include "manifeststore.hpp"
+#include "manifeststore_io.hpp"
+#include "manifestsynth.hpp"
 
-#include "../config.hpp"
 #include "../globals.hpp"
 #include "../log.hpp"
 
-#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
-#include <string>
+#include <fstream>
+#include <iterator>
+#include <mutex>
+#include <sys/stat.h>
 #include <system_error>
+#include <unordered_map>
+
+namespace fs = std::filesystem;
 
 namespace
 {
-	bool allDigits(const std::string& value)
+
+	std::string steamRoot()
 	{
-		return !value.empty() && std::all_of(value.begin(), value.end(), [](unsigned char c) {
-			return c >= '0' && c <= '9';
-		});
+		const char* home = std::getenv("HOME");
+		if (!home) return {};
+		const std::string roots[] = {
+			std::string(home) + "/.steam/steam",
+			std::string(home) + "/.steam/debian-installation",
+			std::string(home) + "/.local/share/Steam",
+		};
+		for (const auto& r : roots)
+		{
+			struct stat st{};
+			if (stat((r + "/steam.sh").c_str(), &st) == 0) return r;
+		}
+		return {};
 	}
 
-	// Steam's content manifest starts with the 32-bit magic 0x71F617D0.
-	bool looksLikeManifest(const std::filesystem::path& path)
+	uint64_t gidFromName(const std::string& name, const std::string& prefix)
 	{
-		std::ifstream file(path, std::ios::binary);
-		if (!file.is_open())
-		{
-			return false;
-		}
-
-		unsigned char magic[4] = {};
-		if (!file.read(reinterpret_cast<char*>(magic), sizeof(magic)))
-		{
-			return false;
-		}
-
-		return magic[0] == 0xd0 && magic[1] == 0x17 && magic[2] == 0xf6 && magic[3] == 0x71;
+		if (name.rfind(prefix, 0) != 0) return 0;
+		const auto dot = name.rfind(".manifest");
+		if (dot == std::string::npos || dot + 9 != name.size()) return 0;
+		const auto gidStr = name.substr(prefix.size(), dot - prefix.size());
+		if (gidStr.empty()) return 0;
+		try { return std::stoull(gidStr); } catch (...) { return 0; }
 	}
 
-	// <depot>_<gid>.manifest
-	bool isManifestName(const std::string& name)
+	std::string manifestName(uint32_t depotId, uint64_t gid)
 	{
-		constexpr size_t suffixLen = 9; // ".manifest"
-		if (name.size() <= suffixLen + 2 || name.compare(name.size() - suffixLen, suffixLen, ".manifest") != 0)
-		{
-			return false;
-		}
-
-		const auto underscore = name.find('_');
-		if (underscore == std::string::npos)
-		{
-			return false;
-		}
-
-		const auto gidLen = name.size() - suffixLen - underscore - 1;
-		return allDigits(name.substr(0, underscore)) && allDigits(name.substr(underscore + 1, gidLen));
+		return std::to_string(depotId) + "_" + std::to_string(gid)
+		    + ".manifest";
 	}
 
-	std::filesystem::path depotCacheDir()
+	struct ManifestKey
 	{
-		if (g_modSteamClient && g_modSteamClient->path)
-		{
-			// <root>/steamrt64/steamclient.so
-			const auto root = std::filesystem::path(g_modSteamClient->path).parent_path().parent_path();
-			return root / "depotcache";
-		}
+		uint32_t depotId;
+		uint64_t gid;
 
-		const char* home = getenv("HOME");
-		if (!home)
+		bool operator==(const ManifestKey&) const = default;
+	};
+
+	struct ManifestKeyHash
+	{
+		size_t operator()(const ManifestKey& key) const
 		{
-			return {};
+			return std::hash<uint64_t>{}(
+			    (static_cast<uint64_t>(key.depotId) << 32) ^ key.gid);
 		}
-		return std::filesystem::path(home) / ".local" / "share" / "Steam" / "depotcache";
+	};
+
+	std::mutex g_sizeMutex;
+	std::unordered_map<ManifestKey, uint64_t, ManifestKeyHash> g_installedSizes;
+
+	std::optional<uint64_t> parseInstalledSize(const fs::path& path)
+	{
+		if (!ManifestStoreIO::isValidManifest(path)) return std::nullopt;
+		std::ifstream input(path, std::ios::binary);
+		if (!input) return std::nullopt;
+		const std::string bytes{std::istreambuf_iterator<char>(input),
+		                        std::istreambuf_iterator<char>()};
+		uint64_t installed = 0;
+		uint64_t download = 0;
+		if (!ManifestSynth::parseManifestSizes(bytes, installed, download)
+		    || installed == 0)
+			return std::nullopt;
+		return installed;
 	}
 }
 
-void ManifestStore::publish()
+namespace ManifestStore
 {
-	std::error_code ec;
-	const auto store = CConfig::getDir() / "manifests";
-	if (!std::filesystem::is_directory(store, ec))
+	std::string dir()
 	{
-		return;
+		const char* home = std::getenv("HOME");
+		if (!home) return {};
+		return std::string(home) + "/.config/ember/manifests";
 	}
 
-	const auto cache = depotCacheDir();
-	if (cache.empty() || !std::filesystem::is_directory(cache, ec))
+	void archiveDepot(uint32_t depotId)
 	{
-		return;
-	}
+		const std::string root = steamRoot();
+		const std::string store = dir();
+		if (root.empty() || store.empty()) return;
 
-	uint32_t published = 0;
-	for (const auto& entry : std::filesystem::directory_iterator(store, ec))
-	{
-		if (!entry.is_regular_file(ec))
+		const fs::path dc = root + "/depotcache";
+		const std::string prefix = std::to_string(depotId) + "_";
+
+		std::error_code ec;
+		if (!fs::is_directory(dc, ec)) return;
+
+		for (const auto& entry : fs::directory_iterator(dc, ec))
 		{
-			continue;
+			if (ec) break;
+			if (!entry.is_regular_file(ec)) continue;
+			const auto name = entry.path().filename().string();
+			if (!gidFromName(name, prefix)) continue;
+			if (!ManifestStoreIO::isValidManifest(entry.path())) continue;
+
+			const fs::path archived = fs::path(store) / name;
+			if (ManifestStoreIO::isValidManifest(archived)
+			    || ManifestStoreIO::atomicCopy(entry.path(), archived))
+			{
+				g_pLog->debug("ManifestStore: archived %s\n", name.c_str());
+			}
+		}
+	}
+
+	void archiveDepots(const std::vector<uint32_t>& depotIds)
+	{
+		for (uint32_t d : depotIds) archiveDepot(d);
+	}
+
+	bool archiveManifest(uint32_t depotId, uint64_t gid)
+	{
+		if (!depotId || !gid) return false;
+		const std::string root = steamRoot();
+		const std::string store = dir();
+		if (root.empty() || store.empty()) return false;
+
+		const std::string name = manifestName(depotId, gid);
+		const fs::path source = fs::path(root) / "depotcache" / name;
+		const fs::path target = fs::path(store) / name;
+		if (!ManifestStoreIO::isValidManifest(source)) return false;
+		if (ManifestStoreIO::isValidManifest(target)) return true;
+		if (!ManifestStoreIO::atomicCopy(source, target)) return false;
+
+		g_pLog->debug("ManifestStore: archived exact %s\n", name.c_str());
+		return true;
+	}
+
+	bool publishDownloadedManifest(uint32_t depotId, uint64_t gid,
+	                               const std::string& sourcePath)
+	{
+		if (!depotId || !gid || sourcePath.empty()) return false;
+		const std::string root = steamRoot();
+		const std::string store = dir();
+		if (root.empty() || store.empty()) return false;
+
+		const std::string name = manifestName(depotId, gid);
+		const fs::path archived = fs::path(store) / name;
+		const fs::path staged = fs::path(root) / "depotcache" / name;
+		const auto result = ManifestStoreIO::publishBestEffort(
+			sourcePath, archived, staged);
+		if (!result.staged) return false;
+		if (!result.archived)
+		{
+			g_pLog->warn(
+				"ManifestStore: staged %s without persistent archive copy\n",
+				name.c_str());
+			return true;
 		}
 
-		const auto name = entry.path().filename().string();
-		if (!isManifestName(name))
+		g_pLog->info("ManifestStore: published downloaded %s (store -> depotcache)\n",
+		             name.c_str());
+		return true;
+	}
+
+	bool isInDepotcache(uint32_t depotId, uint64_t gid)
+	{
+		if (!gid) return false;
+		const std::string root = steamRoot();
+		if (root.empty()) return false;
+
+		const std::string name = manifestName(depotId, gid);
+		const fs::path path = fs::path(root) / "depotcache" / name;
+		return ManifestStoreIO::isValidManifest(path);
+	}
+
+	bool isArchived(uint32_t depotId, uint64_t gid)
+	{
+		if (!depotId || !gid) return false;
+		const std::string store = dir();
+		if (store.empty()) return false;
+		return ManifestStoreIO::isValidManifest(
+		    fs::path(store) / manifestName(depotId, gid));
+	}
+
+	void cacheInstalledSize(uint32_t depotId, uint64_t gid, uint64_t size)
+	{
+		if (!depotId || !gid || !size) return;
+		std::lock_guard lock(g_sizeMutex);
+		g_installedSizes[{depotId, gid}] = size;
+	}
+
+	std::optional<uint64_t> installedSize(uint32_t depotId, uint64_t gid)
+	{
+		if (!depotId || !gid) return std::nullopt;
+		const ManifestKey key{depotId, gid};
 		{
-			LOG_NOTIFYWARN("ManifestStore: ignoring %s (expected <depot>_<gid>.manifest)\n", name.c_str());
-			continue;
+			std::lock_guard lock(g_sizeMutex);
+			if (const auto it = g_installedSizes.find(key);
+			    it != g_installedSizes.end())
+				return it->second;
 		}
 
-		const auto dest = cache / name;
-		if (std::filesystem::exists(dest, ec) &&
-			std::filesystem::file_size(dest, ec) == std::filesystem::file_size(entry.path(), ec))
+		std::optional<uint64_t> size;
+		const std::string store = dir();
+		if (!store.empty())
+			size = parseInstalledSize(fs::path(store) / manifestName(depotId, gid));
+		if (!size)
 		{
-			continue;
+			const std::string root = steamRoot();
+			if (!root.empty())
+				size = parseInstalledSize(
+				    fs::path(root) / "depotcache" / manifestName(depotId, gid));
 		}
+		if (size) cacheInstalledSize(depotId, gid, *size);
+		return size;
+	}
 
-		// A manifest that is empty, or does not start with Steam's content-manifest
-		// magic, would fail to mount — refuse it rather than stage it.
-		const auto size = std::filesystem::file_size(entry.path(), ec);
-		if (ec || size == 0 || !looksLikeManifest(entry.path()))
+	bool restoreToDepotcache(uint32_t depotId, uint64_t gid)
+	{
+		if (!gid) return false;
+		const std::string root = steamRoot();
+		const std::string store = dir();
+		if (root.empty() || store.empty()) return false;
+
+		const std::string name = manifestName(depotId, gid);
+		const fs::path dest = fs::path(root) / "depotcache" / name;
+		const fs::path src = fs::path(store) / name;
+		if (ManifestStoreIO::restore(src, dest))
 		{
-			LOG_NOTIFYWARN("ManifestStore: refusing %s (empty or not a manifest)\n", name.c_str());
-			continue;
+			g_pLog->info("ManifestStore: restored %s into depotcache\n",
+			             name.c_str());
+			return true;
 		}
+		return false;
+	}
 
-		std::filesystem::copy_file(entry.path(), dest, std::filesystem::copy_options::overwrite_existing, ec);
-		if (ec)
+	bool markPreferredGid(uint32_t depotId, uint64_t gid)
+	{
+		const std::string store = dir();
+		if (store.empty() || !isArchived(depotId, gid)) return false;
+		return ManifestStoreIO::writePreferred(store, depotId, gid);
+	}
+
+	uint64_t preferredArchivedGid(uint32_t depotId, uint64_t excludeGid)
+	{
+		const std::string store = dir();
+		if (store.empty()) return 0;
+		const uint64_t gid =
+		    ManifestStoreIO::readPreferred(store, depotId, excludeGid);
+		return isArchived(depotId, gid) ? gid : 0;
+	}
+
+	uint64_t bestArchivedGid(uint32_t depotId, uint64_t excludeGid)
+	{
+		const std::string store = dir();
+		if (store.empty()) return 0;
+
+		std::error_code ec;
+		if (!fs::is_directory(store, ec)) return 0;
+
+		const std::string prefix = std::to_string(depotId) + "_";
+		uint64_t best = 0;
+		fs::file_time_type bestTime{};
+		for (const auto& entry : fs::directory_iterator(store, ec))
 		{
-			LOG_NOTIFYWARN("ManifestStore: cannot publish %s (%s)\n", name.c_str(), ec.message().c_str());
-			continue;
+			if (ec) break;
+			if (!entry.is_regular_file(ec)) continue;
+			const auto name = entry.path().filename().string();
+			const uint64_t gid = gidFromName(name, prefix);
+			if (!gid || gid == excludeGid) continue;
+			if (!ManifestStoreIO::isValidManifest(entry.path())) continue;
+
+			const auto t = entry.last_write_time(ec);
+			if (ec) continue;
+			if (!best || t > bestTime) { best = gid; bestTime = t; }
 		}
-
-		++published;
+		return best;
 	}
 
-	if (published)
+	ArchivedGidIndex archivedGidIndex()
 	{
-		LOG_INFO("ManifestStore: published %u manifest(s) to depotcache\n", published);
+		const std::string store = dir();
+		if (store.empty()) return {};
+		return ManifestStoreIO::newestValidManifestGids(store);
 	}
-}
 
-ManifestStore::StageResult ManifestStore::stage(unsigned int depotId, unsigned long long manifestId)
-{
-	std::error_code ec;
-	const auto cache = depotCacheDir();
-	if (cache.empty() || !std::filesystem::is_directory(cache, ec))
+	void purgeDepots(const std::vector<uint32_t>& depotIds)
 	{
-		return StageResult::Missing;
+		const std::string store = dir();
+		if (store.empty()) return;
+
+		std::error_code ec;
+		if (!fs::is_directory(store, ec)) return;
+
+		for (uint32_t depotId : depotIds)
+		{
+			const std::string prefix = std::to_string(depotId) + "_";
+			for (const auto& entry : fs::directory_iterator(store, ec))
+			{
+				if (ec) break;
+				const auto name = entry.path().filename().string();
+				if (gidFromName(name, prefix))
+				{
+					fs::remove(entry.path(), ec);
+					g_pLog->debug("ManifestStore: purged %s\n", name.c_str());
+				}
+			}
+			fs::remove(ManifestStoreIO::preferredPath(store, depotId), ec);
+		}
 	}
-
-	const auto name = std::to_string(depotId) + "_" + std::to_string(manifestId) + ".manifest";
-	const auto dest = cache / name;
-	const auto src = CConfig::getDir() / "manifests" / name;
-
-	const auto size = std::filesystem::file_size(src, ec);
-	if (ec || size == 0)
-	{
-		return StageResult::Missing;
-	}
-
-	if (std::filesystem::exists(dest, ec) && std::filesystem::file_size(dest, ec) == size)
-	{
-		return StageResult::Present;
-	}
-
-	if (!looksLikeManifest(src))
-	{
-		return StageResult::Missing;
-	}
-
-	std::filesystem::copy_file(src, dest, std::filesystem::copy_options::overwrite_existing, ec);
-	return ec ? StageResult::Missing : StageResult::Copied;
 }

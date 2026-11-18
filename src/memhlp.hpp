@@ -1,21 +1,100 @@
 #pragma once
 
-#include "globals.hpp"
-#include "log.hpp"
-
+#include "ascii.hpp"
 #include "libmem/libmem.h"
-
+#include "log.hpp"
+#include <charconv>
 #include <cstddef>
-#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <unordered_map>
+#include <limits>
+#include <string_view>
+#include <system_error>
 #include <vector>
-
 
 namespace MemHlp
 {
-	extern std::unordered_map<std::string, std::unique_ptr<lm_module_t>> moduleMap;
+
+	inline lm_address_t parseJumpTargetOperand(const char* operand)
+	{
+		if (operand == nullptr)
+			return LM_ADDRESS_BAD;
+
+		std::string_view text(operand);
+		while (!text.empty()
+		       && (text.front() == ' ' || text.front() == '\t'
+		           || text.front() == '\r' || text.front() == '\n'))
+		{
+			text.remove_prefix(1);
+		}
+		while (!text.empty()
+		       && (text.back() == ' ' || text.back() == '\t'
+		           || text.back() == '\r' || text.back() == '\n'))
+		{
+			text.remove_suffix(1);
+		}
+		if (text.empty())
+			return LM_ADDRESS_BAD;
+
+		if (text.size() >= 2 && text[0] == '0'
+		    && (text[1] == 'x' || text[1] == 'X'))
+		{
+			text.remove_prefix(2);
+		}
+		if (text.empty())
+			return LM_ADDRESS_BAD;
+
+		for (const char c : text)
+		{
+			if (!Ascii::isHexDigit(static_cast<unsigned char>(c)))
+				return LM_ADDRESS_BAD;
+		}
+
+		lm_address_t value = 0;
+		const auto parsed = std::from_chars(
+			text.data(), text.data() + text.size(), value, 16);
+		if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size())
+			return LM_ADDRESS_BAD;
+		return value;
+	}
+
+	inline bool prologueWindowWithin(lm_address_t address,
+	                                 lm_address_t lowerBound,
+	                                 lm_size_t offset,
+	                                 lm_size_t prologueSize) noexcept
+	{
+		if (prologueSize == 0 || address < lowerBound)
+			return false;
+		const lm_size_t available = address - lowerBound;
+		return offset <= available
+		    && prologueSize - 1 <= available - offset;
+	}
+
+	inline lm_address_t prologueLowerBound(lm_address_t moduleBase,
+	                                        lm_address_t segmentBase) noexcept
+	{
+		if (segmentBase == LM_ADDRESS_BAD || segmentBase < moduleBase)
+			return moduleBase;
+		return segmentBase;
+	}
+	inline bool prologueByteMatches(int16_t expected, lm_byte_t actual) noexcept
+	{
+		return expected == -1 || expected == actual;
+	}
+	inline bool formatPICThunkInstruction(char* output, std::size_t outputSize,
+	                                      const char* mnemonic,
+	                                      const char* operand,
+	                                      lm_address_t returnAddress) noexcept
+	{
+		if (output == nullptr || outputSize == 0 || mnemonic == nullptr
+		    || operand == nullptr || mnemonic[0] == '\0' || operand[0] == '\0')
+			return false;
+		const int written = std::snprintf(
+			output, outputSize, "%s %s, %p", mnemonic, operand,
+			reinterpret_cast<void*>(returnAddress));
+		return written >= 0
+		    && static_cast<std::size_t>(written) < outputSize;
+	}
 
 	enum class SigFollowMode
 	{
@@ -24,76 +103,80 @@ namespace MemHlp
 		PrologueUpwards
 	};
 
-	///Summary:
-	///Write assembly code to address and increase address by bytes written
 	template<typename ...Args>
 	bool assembleCodeAt(lm_address_t& address, const char* fmt, Args... args)
 	{
 		if (address == LM_ADDRESS_BAD)
 		{
-			LOG_DEBUG("Can't write to LM_ADDRESS_BAD!\n");
+			g_pLog->debug("Can't write to LM_ADDRESS_BAD!\n");
 			return false;
 		}
 
-		const size_t size = snprintf(nullptr, 0, fmt, args...) + 1;
-		std::string code;
-		code.resize(size);
-		snprintf(code.data(), size, fmt, args...);
+		size_t size = snprintf(nullptr, 0, fmt, args...) + 1;
+		char* code = reinterpret_cast<char*>(malloc(size));
+		snprintf(code, size, fmt, args...);
 
 		static lm_inst_t inst;
-		//TODO: Potentially replace with LM_AssembleEx and only allocate memory as needed
+
 		bool success = false;
 
-		if (!LM_Assemble(code.c_str(), &inst))
+		if (!LM_Assemble(code, &inst))
 		{
-			LOG_DEBUG("Failed to assemble %s!\n", code.c_str());
+			g_pLog->debug("Failed to assemble %s!\n", code);
 		}
 		else if (!LM_WriteMemory(address, inst.bytes, inst.size))
 		{
-			LOG_DEBUG("Failed to write %s to 0x%lx!\n", code.c_str(), address);
+			g_pLog->debug("Failed to write %s to %p!\n", code, address);
 		}
 		else
 		{
-			LOG_DEBUG("Wrote %s to 0x%lx with %i bytes\n", code.c_str(), address, inst.size);
+			g_pLog->debug("Wrote %s to %p with %i bytes\n", code, address, inst.size);
 			address += inst.size;
 			success = true;
 		}
 
+		free(code);
 		return success;
 	}
 
-	bool fixRelativeInstructions(const lm_address_t oldLocation, const lm_address_t newLocation, const size_t size);
-
-	lm_module_t* getModule(const std::string& name);
-	lm_module_t* getModuleByAddress(const lm_address_t address, const bool useCached = true);
-	lm_segment_t getSegmentByAddress(const lm_address_t address, const bool useCached = true);
-
-	const char* getTypeName(const void* pClass);
-
-	std::string hexdump(const void* address, const size_t size);
-
 	std::vector<int16_t> patternToBytes(const char* pattern);
-	lm_address_t patternScan(const char* pattern, const lm_module_t& module);
+	lm_address_t patternScan(const char* pattern, lm_module_t module);
 
-	lm_address_t findPrologue(const lm_address_t address, const std::vector<int16_t>& prologueBytes);
-	lm_address_t getJmpTarget(const lm_address_t address);
-	lm_address_t searchSignature
-	(
+	lm_address_t patternScan(const char* pattern, lm_module_t module,
+		std::size_t* matchesOut, std::vector<uintptr_t>* allMatches);
+
+	struct SignatureSearchResult
+	{
+		lm_address_t match = LM_ADDRESS_BAD;
+		lm_address_t target = LM_ADDRESS_BAD;
+
+		std::size_t matches = 0;
+	};
+
+	SignatureSearchResult searchSignatureDetailed(
 		const char* name,
 		const char* signature,
-		const lm_module_t& module = *g_modSteamClient,
-		const SigFollowMode mode = SigFollowMode::None,
-		const void* extraData = nullptr,
-		const size_t extraDataSize = 0
+		lm_module_t module,
+		SigFollowMode mode,
+		const int16_t* extraData,
+		size_t extraDataSize
 	);
+	lm_address_t searchSignature(const char* name, const char* signature, lm_module_t module, SigFollowMode mode, const int16_t* extraData, size_t extraDataSize);
+	lm_address_t searchSignature(const char* name, const char* signature, lm_module_t module, SigFollowMode mode);
+	lm_address_t searchSignature(const char* name, const char* signature, lm_module_t module);
 
-	lm_address_t searchOffsetByTypeName(const void* pClass, const std::string& name);
-	
+	lm_address_t getJmpTarget(lm_address_t address);
+	lm_address_t findPrologue(lm_address_t address, lm_address_t lowerBound,
+	                          const int16_t* prologueBytes, lm_size_t prologueSize);
+
+	bool fixPICThunkCall(const char* name, lm_address_t fn, lm_address_t tramp);
+
+	const char* getTypeName(void* pClass);
+
 	template<typename tFN, typename ...Args>
-	constexpr auto callVFunc(const unsigned int index, void* thisPtr, Args... args)
+	constexpr auto callVFunc(unsigned int index, void* thisPtr, Args... args)
 	{
 		const auto fn = reinterpret_cast<tFN>(*(*reinterpret_cast<lm_address_t***>(thisPtr) + index));
-		LOG_TRACE("Calling vfunc %u from %s at %p\n", index, getTypeName(thisPtr), reinterpret_cast<void*>(fn));
 		return fn(thisPtr, args...);
 	}
 }

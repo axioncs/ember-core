@@ -1,55 +1,45 @@
 #pragma once
 
-#include <cstdint>
-#include <filesystem>
 #include <string>
+#include <type_traits>
+#include <cstdint>
 #include <vector>
-
 
 namespace Utils
 {
 	double calculateEntropy(const std::vector<uint8_t>& bytes);
-	int exec(const std::string& executable, const std::vector<std::string>& args, std::string* stdOut);
-	int exec(const std::vector<std::string>& executableList, const std::vector<std::string>& args, std::string* stdOut);
 	bool isNumber(const char* str);
-	bool isGLIBCBugged(int* pMajorVer = nullptr, int* pMinorVer = nullptr);
-	std::string getFileSHA256(const std::filesystem::path& path);
-	bool notify(const char* title, const char* text, const int timeOut = -1);
-	std::vector<std::string> strsplit(const std::string& str, const std::string& delimeter);
 
 	template<typename T>
 	bool tryConvertToNumber(const char* str, T& out)
 	{
-		if (!isNumber(str))
-		{
-			return false;
-		}
-
 		if constexpr (std::is_same_v<T, int32_t>)
 		{
+			if (!isNumber(str))
+			{
+				return false;
+			}
+
 			out = std::stoi(str);
+			return true;
 		}
 
 		else if constexpr (std::is_same_v<T, uint32_t>)
 		{
+			if (!isNumber(str))
+			{
+				return false;
+			}
+
 			out = std::stoul(str);
+			return true;
 		}
 
-		else if constexpr (std::is_same_v<T, int64_t>)
-		{
-			out = std::stoll(str);
-		}
-
-		else if constexpr (std::is_same_v<T, uint64_t>)
-		{
-			out = std::stoull(str);
-		}
-
-		else
-		{
-			return false;
-		}
-
-		return true;
+		return false;
 	}
+
+	std::vector<std::string> strsplit(const char* str, const char* delimeter);
+	std::string getFileSHA256(const char* filePath);
+
+	std::string getBuildId(const char* filePath);
 }

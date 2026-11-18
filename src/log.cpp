@@ -1,247 +1,114 @@
 #include "log.hpp"
 
 #include "config.hpp"
-#include "utils.hpp"
 
-#include <cstdarg>
-#include <cstddef>
-#include <cstdio>
+#include <chrono>
+#include <cstdint>
 #include <cstdlib>
-#include <cstring>
-#include <cstdlib>
-#include <filesystem>
+#include <dlfcn.h>
 #include <memory>
-#include <sstream>
-#include <system_error>
 
-
-std::string ELogLevel_ToString(const LogLevelFlags_t lvlFlags)
+namespace
 {
-	constexpr static auto flagToString = [](const unsigned int flag)
+	bool sendDbusNotification(const char* appName, const char* summary,
+	                          const char* body, int32_t timeoutMs)
 	{
-		switch(flag)
+		void* lib = dlopen("libdbus-1.so.3", RTLD_LAZY | RTLD_NOLOAD);
+		if (!lib)
 		{
-			case k_ELogLevelTrace:
-				return "Trace";
-			case k_ELogLevelOnce:
-				return "Once";
-			case k_ELogLevelDebug:
-				return "Debug";
-			case k_ELogLevelWarn:
-				return "Warn";
-			case k_ELogLevelError:
-				return "Error";
-			case k_ELogLevelInfo:
-				return "Info";
-			case k_ELogLevelNotifyShort:
-				return "Notify";
-			case k_ELogLevelNotifyLong:
-				return "Notify Long";
-			case k_ELogLevelAPI:
-				return "API";
-
-			default:
-				return "Unknown";
+			lib = dlopen("libdbus-1.so.3", RTLD_LAZY);
 		}
-	};
-
-	std::ostringstream lvlStr;
-
-	for (int i = ELogLevelCount - 1; i >= 0; i--)
-	{
-		const unsigned int flag = 1 << i;
-
-		if (lvlFlags & flag)
+		if (!lib)
 		{
-			if (lvlStr.str().size() > 0)
-			{
-				lvlStr << "|";
-			}
-
-			lvlStr << flagToString(flag);
-		}
-	}
-
-	return lvlStr.str();
-}
-
-bool CLog::shouldNotify(const LogLevelFlags_t flags)
-{
-	const unsigned int configLevels = g_config.logLevels.copy();
-	if ((flags & k_ELogLevelNotifyLong) && (configLevels & k_ELogLevelNotifyLong))
-	{
-		return true;
-	}
-
-	if ((flags & k_ELogLevelNotifyShort) && (configLevels & k_ELogLevelNotifyShort))
-	{
-		return true;
-	}
-
-	return false;
-}
-
-CLog::Notification_t CLog::buildNotification(const LogLevelFlags_t flags, const char* msg)
-{
-	const bool notifyShort = flags & k_ELogLevelNotifyShort;
-	const bool notifyLong = flags & k_ELogLevelNotifyLong;
-
-	Notification_t notify { };
-
-	if (!notifyShort && !notifyLong)
-	{
-		return notify;
-	}
-
-	const bool warn = flags & k_ELogLevelWarn;
-	const bool error = flags & k_ELogLevelError;
-
-	std::ostringstream notifySS;
-
-	if (flags & k_ELogLevelNotifyLong)
-	{
-		notify.timeOut = 30000;
-	}
-	else if (flags & k_ELogLevelNotifyShort)
-	{
-		notify.timeOut = 10000;
-	}
-
-	if (error)
-	{
-		notifySS << "Error:\n";
-	}
-	else if (warn)
-	{
-		notifySS << "Warning:\n";
-	}
-
-	//Leading quote is added by error/warn/none if statement above
-	notifySS << msg;
-
-	notify.msg = notifySS.str();
-
-	return notify;
-}
-
-void CLog::__log(const LogLevelFlags_t flags, const char* file, const char* function, const int line, const char* msg, va_list& vArgs)
-{
-	if (!(g_config.logLevels.copy() & flags))
-	{
-		return;
-	}
-
-	va_list vArgsCpy;
-	va_copy(vArgsCpy, vArgs);
-	const size_t size = vsnprintf(nullptr, 0, msg, vArgsCpy) + 1; //Allocate one more byte for zero termination
-	va_end(vArgsCpy);
-
-	std::string formatted;
-	formatted.resize(size);
-
-	va_copy(vArgsCpy, vArgs);
-	vsnprintf(formatted.data(), size, msg, vArgsCpy);
-	va_end(vArgsCpy);
-
-	//Notifications do not get a newline ending, so we add our own
-	//Use built string to check further down
-	const auto notification = buildNotification(flags, formatted.c_str());
-
-	if (shouldNotify(flags) && notification.msg.size())
-	{
-		Utils::notify("ember", notification.msg.c_str(), notification.timeOut);
-		debug(file, function, line, "dbus-notification(\"%s\")\n", notification.msg.c_str());
-	}
-
-	std::ostringstream prefixSS;
-
-	if (file && function)
-	{
-		prefixSS << "[" << ELogLevel_ToString(flags) << " in " << file << ":" << function << ":" << line << "]";
-	}
-	else
-	{
-		prefixSS << "[" << ELogLevel_ToString(flags) << "]";
-	}
-
-	const auto prefix = prefixSS.str();
-
-	const auto lock = std::lock_guard(mutex);
-
-	//Prevent crashes from queued operations
-	if (!ofstream.is_open())
-	{
-		return;
-	}
-
-	if (flags & k_ELogLevelOnce)
-	{
-		for (const auto& oldMsg : msgHist)
-		{
-			if (oldMsg == formatted)
-			{
-				return;
-			}
+			return false;
 		}
 
-		msgHist.emplace(formatted);
+		using BusGetFn = void*(*)(int, void*);
+		using MsgNewFn = void*(*)(const char*, const char*, const char*, const char*);
+		using IterInitFn = void(*)(void*, void*);
+		using IterAppendFn = int(*)(void*, int, const void*);
+		using IterOpenFn = int(*)(void*, int, const char*, void*);
+		using IterCloseFn = int(*)(void*, void*);
+		using ConnSendFn = int(*)(void*, void*, uint32_t*);
+		using ConnFlushFn = void(*)(void*);
+		using MsgUnrefFn = void(*)(void*);
+
+		auto busGet = reinterpret_cast<BusGetFn>(dlsym(lib, "dbus_bus_get"));
+		auto msgNew = reinterpret_cast<MsgNewFn>(dlsym(lib, "dbus_message_new_method_call"));
+		auto iterInit = reinterpret_cast<IterInitFn>(dlsym(lib, "dbus_message_iter_init_append"));
+		auto iterAppend = reinterpret_cast<IterAppendFn>(dlsym(lib, "dbus_message_iter_append_basic"));
+		auto iterOpen = reinterpret_cast<IterOpenFn>(dlsym(lib, "dbus_message_iter_open_container"));
+		auto iterClose = reinterpret_cast<IterCloseFn>(dlsym(lib, "dbus_message_iter_close_container"));
+		auto connSend = reinterpret_cast<ConnSendFn>(dlsym(lib, "dbus_connection_send"));
+		auto connFlush = reinterpret_cast<ConnFlushFn>(dlsym(lib, "dbus_connection_flush"));
+		auto msgUnref = reinterpret_cast<MsgUnrefFn>(dlsym(lib, "dbus_message_unref"));
+
+		if (!busGet || !msgNew || !iterInit || !iterAppend || !iterOpen ||
+		    !iterClose || !connSend || !connFlush || !msgUnref)
+		{
+			return false;
+		}
+
+		void* conn = busGet(0 , nullptr);
+		if (!conn)
+		{
+			return false;
+		}
+
+		void* msg = msgNew("org.freedesktop.Notifications",
+		                   "/org/freedesktop/Notifications",
+		                   "org.freedesktop.Notifications",
+		                   "Notify");
+		if (!msg)
+		{
+			return false;
+		}
+
+		alignas(8) unsigned char iter[128]{};
+		alignas(8) unsigned char sub[128]{};
+		iterInit(msg, iter);
+
+		const uint32_t replacesId = 0;
+		const char* icon = "";
+		bool ok = iterAppend(iter, 's', &appName)
+			&& iterAppend(iter, 'u', &replacesId)
+			&& iterAppend(iter, 's', &icon)
+			&& iterAppend(iter, 's', &summary)
+			&& iterAppend(iter, 's', &body)
+			&& iterOpen(iter, 'a', "s", sub)
+			&& iterClose(iter, sub)
+			&& iterOpen(iter, 'a', "{sv}", sub)
+			&& iterClose(iter, sub)
+			&& iterAppend(iter, 'i', &timeoutMs);
+
+		if (ok && connSend(conn, msg, nullptr))
+		{
+			connFlush(conn);
+			msgUnref(msg);
+			return true;
+		}
+
+		msgUnref(msg);
+		return false;
 	}
-
-	//ofstream << prefix << std::setfill(' ') << std::setw(80 - prefix.size()) << " " << formatted.c_str();
-	//Padding makes things nicer, but basically unreadable
-	ofstream << prefix << " " << formatted.c_str();
-
-	if (notification.msg.size() > 0)
-	{
-		ofstream << "\n";
-	}
-
-	ofstream.flush();
 }
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunused-parameter"
-void CLog::__trace(const char* file, const char* function, const int line, const char* msg, va_list& vArgs)
-{
-#ifdef TRACE
-	__log(k_ELogLevelTrace, file, function, line, msg, vArgs);
-#endif
-}
-void CLog::__traceOnce(const char* file, const char* function, const int line, const char* msg, va_list& vArgs)
-{
-#ifdef TRACE
-	__log(k_ELogLevelTrace | k_ELogLevelOnce, file, function, line, msg, vArgs);
-#endif
-}
-
-void CLog::__once(const char* file, const char* function, const int line, const char* msg, va_list& vArgs)
-{
-#ifdef DEBUG
-	__log(k_ELogLevelOnce, file, function, line, msg, vArgs);
-#endif
-}
-void CLog::__debug(const char* file, const char* function, const int line, const char* msg, va_list& vArgs)
-{
-#ifdef DEBUG
-	__log(k_ELogLevelDebug, file, function, line, msg, vArgs);
-#endif
-}
-void CLog::__debugOnce(const char* file, const char* function, const int line, const char* msg, va_list& vArgs)
-{
-#ifdef DEBUG
-	__log(k_ELogLevelDebug | k_ELogLevelOnce, file, function, line, msg, vArgs);
-#endif
-}
-#pragma GCC diagnostic pop
+using std::chrono::duration_cast;
 
 CLog::CLog(const char* path) : path(path)
 {
-	ofstream = std::ofstream(path);
+
+	ofstream = std::ofstream(path, std::ios::out | std::ios::app);
 	if (!ofstream.is_open())
 	{
-		//We don't want to boot without a logfile
 		throw std::runtime_error("Unable to open logfile!");
 	}
+
+	const char* loc = getenv("LC_ALL");
+	if (!loc || !loc[0]) loc = getenv("LC_MESSAGES");
+	if (!loc || !loc[0]) loc = getenv("LANG");
+	if (!loc || !loc[0]) loc = getenv("LANGUAGE");
+	m_lang = detectLang(loc);
 }
 
 CLog::~CLog()
@@ -252,145 +119,71 @@ CLog::~CLog()
 	}
 }
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunused-parameter"
-void CLog::trace(const char* file, const char* function, const int line, const char* msg, ...)
+LogLevel CLog::getMinLevel()
 {
-#ifdef TRACE
-	va_list vArgs;
-	va_start(vArgs, msg);
-	__trace(file, function, line, msg, vArgs);
-	va_end(vArgs);
-#endif
-}
-void CLog::traceOnce(const char* file, const char* function, const int line, const char* msg, ...)
-{
-#ifdef TRACE
-	va_list vArgs;
-	va_start(vArgs, msg);
-	__traceOnce(file, function, line, msg, vArgs);
-	va_end(vArgs);
-#endif
+	return static_cast<LogLevel>(g_config.logLevel.get());
 }
 
-void CLog::once(const char* file, const char* function, const int line, const char* msg, ...)
+bool CLog::shouldNotify()
 {
-#ifdef DEBUG
-	va_list vArgs;
-	va_start(vArgs, msg);
-	__once(file, function, line, msg, vArgs);
-	va_end(vArgs);
-#endif
+	return g_config.notifications.get();
 }
-void CLog::debug(const char* file, const char* function, const int line, const char* msg, ...)
-{
-#ifdef DEBUG
-	va_list vArgs;
-	va_start(vArgs, msg);
-	__debug(file, function, line, msg, vArgs);
-	va_end(vArgs);
-#endif
-}
-void CLog::debugOnce(const char* file, const char* function, const int line, const char* msg, ...)
-{
-#ifdef DEBUG
-	va_list vArgs;
-	va_start(vArgs, msg);
-	__debugOnce(file, function, line, msg, vArgs);
-	va_end(vArgs);
-#endif
-}
-#pragma GCC diagnostic pop
 
-void CLog::warn(const char* file, const char* function, const int line, const char* msg, ...)
+void CLog::notifyUser(UserMsg msg, const std::string& detail)
 {
-	va_list vArgs;
-	va_start(vArgs, msg);
-	__log(k_ELogLevelWarn, file, function, line, msg, vArgs);
-	va_end(vArgs);
-}
-void CLog::error(const char* file, const char* function, const int line, const char* msg, ...)
-{
-	va_list vArgs;
-	va_start(vArgs, msg);
-	__log(k_ELogLevelError, file, function, line, msg, vArgs);
-	va_end(vArgs);
-}
-void CLog::info(const char* file, const char* function, const int line, const char* msg, ...)
-{
-	va_list vArgs;
-	va_start(vArgs, msg);
-	__log(k_ELogLevelInfo, file, function, line, msg, vArgs);
-	va_end(vArgs);
-}
-void CLog::notify(const char* file, const char* function, const int line, const char* msg, ...)
-{
-	va_list vArgs;
-	va_start(vArgs, msg);
-	__log(k_ELogLevelNotifyShort | k_ELogLevelInfo, file, function, line, msg, vArgs);
-	va_end(vArgs);
-}
-void CLog::notifyLong(const char* file, const char* function, const int line, const char* msg, ...)
-{
-	va_list vArgs;
-	va_start(vArgs, msg);
-	__log(k_ELogLevelNotifyLong | k_ELogLevelInfo, file, function, line, msg, vArgs);
-	va_end(vArgs);
-}
-void CLog::notifyWarn(const char* file, const char* function, const int line, const char* msg, ...)
-{
-	va_list vArgs;
-	va_start(vArgs, msg);
-	__log(k_ELogLevelNotifyLong | k_ELogLevelWarn, file, function, line, msg, vArgs);
-	va_end(vArgs);
-}
-void CLog::notifyError(const char* file, const char* function, const int line, const char* msg, ...)
-{
-	va_list vArgs;
-	va_start(vArgs, msg);
-	//Notify type doesn't really matter, since critical stays until clicked
-	__log(k_ELogLevelNotifyLong | k_ELogLevelError, file, function, line, msg, vArgs);
-	va_end(vArgs);
-}
-void CLog::api(const char* file, const char* function, const int line, const char* msg, ...)
-{
-	va_list vArgs;
-	va_start(vArgs, msg);
-	__log(k_ELogLevelAPI, file, function, line, msg, vArgs);
-	va_end(vArgs);
-}
-void CLog::custom(const unsigned int flags, const char* file, const char* function, const int line, const char* msg, ...)
-{
-	va_list vArgs;
-	va_start(vArgs, msg);
+	const UiMessage ui = messageFor(msg, m_lang);
+	const std::string body = substituteDetail(ui.body, detail);
 
-	//Obviously these calls will not get fully optimized out
-	if (flags == k_ELogLevelTrace)
+	info("notifyUser: %s\n", body.c_str());
+
+	if (!shouldNotify() || t_suppressNotify)
 	{
-		__trace(file, function, line, msg, vArgs);
-	}
-	else if (flags == (k_ELogLevelTrace | k_ELogLevelOnce))
-	{
-		__traceOnce(file, function, line, msg, vArgs);
-	}
-	if (flags == k_ELogLevelOnce)
-	{
-		__once(file, function, line, msg, vArgs);
-	}
-	else if (flags == k_ELogLevelDebug)
-	{
-		__debug(file, function, line, msg, vArgs);
-	}
-	else if (flags == (k_ELogLevelDebug | k_ELogLevelOnce))
-	{
-		__debugOnce(file, function, line, msg, vArgs);
-	}
-	else
-	{
-		__log(flags, file, function, line, msg, vArgs);
+		return;
 	}
 
-	va_end(vArgs);
+	int timeoutMs = 30000;
+	if (ui.severity == Severity::Info)
+	{
+		timeoutMs = 10000;
+	}
+
+	int suppressed = 0;
+	bool emit = false;
+	{
+		const long long nowMs = duration_cast<std::chrono::milliseconds>(
+			std::chrono::steady_clock::now().time_since_epoch()).count();
+		std::lock_guard<std::mutex> lk(m_notifyMu);
+		emit = m_notifyThrottle.allow(static_cast<int>(msg), nowMs, suppressed);
+	}
+
+	if (!emit)
+	{
+		return;
+	}
+	if (suppressed > 0)
+	{
+		info("notifyUser: (%d earlier occurrence(s) of this message were "
+		     "suppressed)\n", suppressed);
+	}
+
+	std::string shown = body;
+	const std::string suffix = suppressedSuffix(m_lang, suppressed);
+	if (!suffix.empty())
+	{
+		shown += " " + suffix;
+	}
+
+	const std::string cmd =
+		Notify::buildCommandRaw("ember-moon-x64", shown, timeoutMs, "normal");
+
+	(void)Notify::enqueueGamepadEventForUser("ember-moon-x64", shown, timeoutMs);
+	const int rc = system((cmd + " >/dev/null 2>&1").c_str());
+	if (rc != 0)
+	{
+
+		(void)sendDbusNotification("ember-moon-x64", "ember-moon-x64",
+		                           shown.c_str(), timeoutMs);
+	}
 }
 
 CLog* CLog::createDefaultLog()
@@ -398,18 +191,8 @@ CLog* CLog::createDefaultLog()
 	const char* home = getenv("HOME");
 	if (home)
 	{
-		std::ostringstream ss;
+		std::stringstream ss;
 		ss << home << "/.ember.log";
-
-		// Keep one previous generation so the log cannot grow without bound.
-		std::error_code ec;
-		const std::filesystem::path path = ss.str();
-		if (std::filesystem::exists(path, ec) && std::filesystem::file_size(path, ec) > (8u << 20))
-		{
-			auto previous = path;
-			previous += ".1";
-			std::filesystem::rename(path, previous, ec);
-		}
 
 		return new CLog(ss.str().c_str());
 	}

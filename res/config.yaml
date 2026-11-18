@@ -136,8 +136,12 @@ Cloud: yes
 #Which rclone remote ember cloud syncs that directory to, and the folder inside
 #it. Both are optional: without a remote, saves simply stay on this machine.
 #Set them from NixOS with programs.ember.cloudRemote / .cloudFolder.
+#
+#CloudFolder is namespaced to ember on purpose. Another save-sync tool uses
+#CloudRedirect, and its files look nothing like ember's - syncing into the same
+#folder would make each tool treat the other's data as stale and delete it.
 CloudRemote: ""
-CloudFolder: CloudRedirect
+CloudFolder: ember-cloud
 
 #Disable updates for AppIds on AdditionalApps
 #Only works for unowned games, since those do not get any depots from CUserAppManager::BuildDepotDependency.

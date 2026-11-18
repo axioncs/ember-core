@@ -120,7 +120,7 @@ DisableCloud: no
 
 #Keep managed games on the latest build. Default "yes" (games auto-update).
 #Set to "no" to lock every managed game to its currently installed build (like
-#LuaTools' "Auto Update Apps" toggle). Builds you pin per game still apply.
+#the plugin's toggle of the same name). Builds you pin per game still apply.
 AutoUpdateApps: yes
 
 # Share short-lived manifest request codes for depots this account really owns.

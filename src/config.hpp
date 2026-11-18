@@ -78,9 +78,10 @@ public:
 	MTVariable<bool> notifyInit;
 	MTVariable<bool> api;
 	MTVariable<bool> plugins;
-	MTVariable<bool> disableCloud;
 	MTVariable<bool> disableUpdates;
 	MTVariable<bool> cloud;
+	MTVariable<std::string> cloudRemote;
+	MTVariable<std::string> cloudFolder;
 	MTVariable<std::string> fakeName;
 	MTVariable<std::string> fakeEmail;
 	MTVariable<int32_t> fakeWalletBalance;

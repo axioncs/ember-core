@@ -125,15 +125,19 @@ API: no
 #SLSsteam plugins can run arbitrary code! So only run plugins you trust
 Plugins: no
 
-#Disable cloud saves for unlocked games. ember answers Steam's cloud RPCs itself
-#when Cloud is enabled below, so leaving this on would keep saves away from it.
-DisableCloud: no
-
-#Serve Steam Cloud save files from ~/.config/ember/cloud instead of the account's
-#Steam Cloud. Added apps then keep their saves across machines through whatever
-#the CLI syncs that directory to. Owned games are unaffected: their RPCs still
-#reach Steam.
+#Saves for games you added are stored in ~/.config/ember/cloud and served to
+#Steam from there, because Steam refuses cloud saves for apps the account does
+#not own. Games you do own keep using Steam's own cloud untouched.
+#
+#On by default. Set to "no" to hand added games back to Steam (they get none),
+#or set it from NixOS with programs.ember.cloud = false.
 Cloud: yes
+
+#Which rclone remote ember cloud syncs that directory to, and the folder inside
+#it. Both are optional: without a remote, saves simply stay on this machine.
+#Set them from NixOS with programs.ember.cloudRemote / .cloudFolder.
+CloudRemote: ""
+CloudFolder: CloudRedirect
 
 #Disable updates for AppIds on AdditionalApps
 #Only works for unowned games, since those do not get any depots from CUserAppManager::BuildDepotDependency.

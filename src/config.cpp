@@ -14,6 +14,8 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -313,9 +315,27 @@ bool CConfig::loadSettings(const bool firstLoad, const bool silent)
 	fakeEmail = getSetting<std::string>(rootNode, "FakeEmail", "");
 	fakeWalletBalance = getSetting<int32_t>(rootNode, "FakeWalletBalance", 0);
 	plugins = getSetting<bool>(rootNode, "Plugins", false);
-	disableCloud = getSetting<bool>(rootNode, "DisableCloud", false);
 	disableUpdates = getSetting<bool>(rootNode, "DisableUpdates", true);
 	cloud = getSetting<bool>(rootNode, "Cloud", true);
+
+	// Environment overrides, applied after the file so a declarative layer
+	// (the NixOS module) can set these without rewriting a file the user owns.
+	// config.yaml stays the user-editable source of truth; these win when set.
+	if (const char* v = getenv("EMBER_CLOUD"))
+	{
+		// 0/no/false (any case) disables; anything else leaves the default on.
+		std::string s(v);
+		for (auto& c : s) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+		cloud.set(!(s == "0" || s == "no" || s == "false"));
+	}
+	if (const char* v = getenv("EMBER_CLOUD_REMOTE"))
+	{
+		cloudRemote.set(std::string(v));
+	}
+	if (const char* v = getenv("EMBER_CLOUD_FOLDER"))
+	{
+		cloudFolder.set(std::string(v));
+	}
 	dumpInterfaceMaps = getSetting<bool>(rootNode, "DumpClientInterfaces", false);
 	extendedLogging = getSetting<bool>(rootNode, "ExtendedLogging", false);
 

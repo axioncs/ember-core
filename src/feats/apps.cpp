@@ -1001,14 +1001,19 @@ void Apps::spawnGame(const GameId_t* gameId, std::string& cmd, std::string& cmdl
 
 bool Apps::shouldDisableCloud(const AppId_t appId)
 {
-	if (!g_config.disableCloud.copy())
-	{
-		return false;
-	}
-
 	// ember serves cloud for the apps it added, so the ownership proxy below is
 	// the wrong question for them: isSubscribed() is false by design for an added
 	// app, and that would switch off exactly the saves this is meant to keep.
+	//
+	// The stock DisableCloud key is deliberately not consulted: ember now owns
+	// this decision through Cloud, and honouring both would let a leftover
+	// "DisableCloud: yes" from an older config silently disable the feature.
+	// Cloud: no turns it off; nothing else does.
+	if (!g_config.cloud.copy())
+	{
+		return true;
+	}
+
 	if (g_config.isAddedAppId(appId))
 	{
 		return false;

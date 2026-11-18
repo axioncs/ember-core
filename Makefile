@@ -1,7 +1,7 @@
 # Build glue for ember.
 #
 # Common invocations:
-#   make             Build bin/ember-core.so + bin/library-inject.so on the host.
+#   make             Build bin/ember-core.so + bin/ember-library-inject.so on the host.
 #                    Use scripts/build.sh --portable for a release-grade
 #                    binary with broader glibc compatibility.
 #   make clean       Remove all build artefacts.
@@ -137,7 +137,7 @@ test-stats-audit: bin/ember-core.so
 	LD_AUDIT='$(CURDIR)/bin/ember-core.so' /tmp/test_stats_audit audit
 
 all: build
-build: bin/ember-core.so bin/library-inject.so bin/pattern-refresh
+build: bin/ember-core.so bin/ember-library-inject.so bin/pattern-refresh
 rebuild: clean build
 
 bin/ember-core.so: $(objs) $(libs)
@@ -146,7 +146,7 @@ bin/ember-core.so: $(objs) $(libs)
 
 # Audit-side helper that redirects libcurl loading to a system copy.
 # Loaded ahead of ember-core.so via $LD_AUDIT.
-bin/library-inject.so: tools/library-inject/main.cpp
+bin/ember-library-inject.so: tools/library-inject/main.cpp
 	@mkdir -p bin
 	$(CXX) -O3 -m64 -fPIC -shared -std=c++20 $< -o $@
 

@@ -4,7 +4,7 @@
 # Produces:
 #   dist/ember-linux-<version>.zip
 #
-# Layout inside the zip (matches what consumers and luatools-moon
+# Layout inside the zip (matches what consumers and ember
 # expect: a single top-level ember-<version>/ directory containing
 # setup.sh and bin/, and the assets setup.sh references):
 #
@@ -156,7 +156,7 @@ cp -r tools/steamless-bin "$PKG_DIR/tools/"
 echo "==> zipping $ZIP_PATH"
 ( cd dist && zip -qr -9 "ember-linux-${VERSION}.zip" "ember-${VERSION}" )
 # Publish a sha256 sidecar next to the asset. The installer on the paired
-# luatools-moon branch fetches "<asset>.sha256" and refuses an asset that does
+# ember branch fetches "<asset>.sha256" and refuses an asset that does
 # not match it, so a truncated or altered archive is caught before it is unpacked
 # and executed; an installer that predates that change ignores the sidecar. This
 # detects transport and mirror damage, NOT a compromised publishing account —

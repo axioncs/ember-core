@@ -17,10 +17,10 @@ check() {
 
 releases='[
   {"tag_name":"v2.9","draft":false,"prerelease":false,"assets":[
-    {"name":"ember-linux-2.9-lumen.zip.uploading","browser_download_url":"https://github.invalid/temp"}
+    {"name":"ember-linux-2.9-sidecar.zip.uploading","browser_download_url":"https://github.invalid/temp"}
   ]},
   {"tag_name":"v2.8","draft":false,"prerelease":false,"assets":[
-    {"name":"ember-linux-2.8-lumen.zip","browser_download_url":"https://github.invalid/v2.8.zip"}
+    {"name":"ember-linux-2.8-sidecar.zip","browser_download_url":"https://github.invalid/v2.8.zip"}
   ]}
 ]'
 check "temporary asset is ignored" "$(resolve_github_asset "$releases")" \
@@ -31,14 +31,14 @@ manifest='{
   "components": {
     "ember": {
       "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      "url": "https://cdn.jsdelivr.net/gh/swwayps/jsdelivr@0123456789012345678901234567890123456789/releases/ember/v2.9/hash/ember-linux-2.9-lumen.zip"
+      "url": "https://cdn.jsdelivr.net/gh/swwayps/jsdelivr@0123456789012345678901234567890123456789/releases/ember/v2.9/hash/ember-linux-2.9-sidecar.zip"
     }
   }
 }'
 entry="$(resolve_mirror_entry "$manifest")"
 IFS=$'\t' read -r mirror_url mirror_sha <<< "$entry"
 check "mirror URL parsed" "$mirror_url" \
-	"https://cdn.jsdelivr.net/gh/swwayps/jsdelivr@0123456789012345678901234567890123456789/releases/ember/v2.9/hash/ember-linux-2.9-lumen.zip"
+	"https://cdn.jsdelivr.net/gh/swwayps/jsdelivr@0123456789012345678901234567890123456789/releases/ember/v2.9/hash/ember-linux-2.9-sidecar.zip"
 check "mirror digest parsed" "$mirror_sha" \
 	"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 check "commit-pinned mirror entry accepted" \

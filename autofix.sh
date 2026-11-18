@@ -2,17 +2,17 @@
 # ============================================================================
 # ember auto-fix
 #
-# Runs when Lumen detects that ember did NOT inject into the current
-# Steam session (the "Buy" button shows on games added via LuaTools). It:
-#   1. downloads the LATEST ember (Lumen) release asset,
+# Runs when sidecar detects that ember did NOT inject into the current
+# Steam session (the "Buy" button shows on games added via ember). It:
+#   1. downloads the LATEST ember (sidecar) release asset,
 #   2. runs its setup.sh install — which stops Steam, installs the library and
 #      repairs EVERY *steam*.desktop launcher on the system (prompting for the
 #      sudo password here in the terminal for the system-wide entries),
 #   3. relaunches Steam through the injected wrapper.
 #
 # Self-contained: fetched + run via `curl -fsSL <raw>/autofix.sh | bash`, so it
-# must not depend on any sibling file. Only touches ember (not Lumen or
-# the LuaTools plugin).
+# must not depend on any sibling file. Only touches ember (not sidecar or
+# the ember plugin).
 #
 # Served from the repo's raw branch URL, so fixes go live without a release cut.
 # ============================================================================
@@ -23,8 +23,8 @@ REPO="swwayps/ember"
 # so it uses '.*'; the grep fallback scans raw JSON, so it uses '[^"]*' to avoid
 # crossing a quote. Both use '[.]' for a literal dot (a bare '\.' is not a valid
 # jq string escape and a raw '"' inside a jq "..." string breaks the parse).
-ASSET_RE_JQ='^ember-linux-.*-lumen[.]zip$'
-ASSET_RE_GREP='ember-linux-[^"]*-lumen[.]zip"'
+ASSET_RE_JQ='^ember-linux-.*-sidecar[.]zip$'
+ASSET_RE_GREP='ember-linux-[^"]*-sidecar[.]zip"'
 MIRROR_MANIFEST="https://cdn.jsdelivr.net/gh/swwayps/jsdelivr@main/manifest.json"
 EMBERDIR="$HOME/.local/share/ember"
 WRAPPER="$EMBERDIR/path/steam"
@@ -108,7 +108,7 @@ echo
 
 command -v curl >/dev/null 2>&1 || die "curl is required but not installed."
 
-# ── 1. resolve the latest -lumen release asset ──────────────────────────────
+# ── 1. resolve the latest -sidecar release asset ──────────────────────────────
 info "Finding the latest ember release"
 API="https://api.github.com/repos/${REPO}/releases?per_page=50"
 RELEASES_JSON="$(curl -fsSL --connect-timeout 15 --retry 3 --retry-delay 2 \
@@ -199,5 +199,5 @@ else
 fi
 
 echo
-ok "Done. Your LuaTools games should now show Install/Play instead of Buy."
+ok "Done. Your ember games should now show Install/Play instead of Buy."
 pause

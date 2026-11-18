@@ -108,8 +108,8 @@ int main()
 		const UiMessage pt = messageFor(UserMsg::GamePreparationFailed, Lang::Portuguese);
 		CHECK(contains(en.body, "{detail}") && contains(pt.body, "{detail}"),
 		      "GamePreparationFailed identifies the AppID");
-		CHECK(contains(en.body, "LuaTools") && contains(pt.body, "LuaTools"),
-		      "GamePreparationFailed points to re-adding through LuaTools");
+		CHECK(contains(en.body, "Re-add") && contains(pt.body, "Adicione"),
+		      "GamePreparationFailed asks the user to re-add the game");
 		CHECK(!contains(en.body, "restart") && !contains(pt.body, "Reinicie") &&
 		      !contains(pt.body, "reinicie"),
 		      "GamePreparationFailed does not recommend restarting Steam");

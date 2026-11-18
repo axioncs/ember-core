@@ -32,7 +32,7 @@ int main() {
     const std::string bad =
         "API: false\n"
         "AdditionalApps:\n"
-        "  - 4149320   # added via LuaTools\n"
+        "  - 4149320   # added via ember\n"
         "- 381210\n"
         "- 489980\n"
         "AppIds: null\n"

@@ -81,7 +81,7 @@ int main()
 	Apps::setDiscoveredAppDlcIds({kManagedDlc});
 	CHECK(Apps::ownershipOverrideAllowed(
 	          true, false, false, false, false, false, false),
-	      "a LuaTools-managed app remains eligible before type discovery");
+	      "a ember-managed app remains eligible before type discovery");
 	CHECK(Apps::ownershipOverrideAllowed(
 	          true, false, true, true, false, false, true),
 	      "package-zero owns flag does not prove native ownership");
@@ -136,7 +136,7 @@ int main()
 	Apps::setConfiguredAppDlcIds(CConfig::selectConfiguredDlcIds(
 		g_config.managedAppIds.get(), g_config.dlcData.get()));
 	CHECK(DLC::getDlcCount(kBaseApp) == 1,
-	      "DlcData remains available for a LuaTools-managed base app");
+	      "DlcData remains available for a ember-managed base app");
 	std::uint32_t manualDlc = 0;
 	bool manualAvailable = false;
 	char manualName[32] = {};

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: AGPL-3.0-only
 #
-# test-wrapper-lumen.sh - the wrapper's sidecar decisions.
+# test-wrapper-sidecar.sh - the wrapper's sidecar decisions.
 #
-# Two things used to be invisible: Lumen's output went to /dev/null, and the
-# wrapper happily started a second sidecar next to the user service (Lumen's own
+# Two things used to be invisible: sidecar's output went to /dev/null, and the
+# wrapper happily started a second sidecar next to the user service (sidecar's own
 # lock then dropped one of them). This drives the GENERATED wrapper with a fake
-# Lumen, a fake systemctl and a fake Steam, and checks which of the two owns the
+# sidecar, a fake systemctl and a fake Steam, and checks which of the two owns the
 # sidecar, that the log is written, and that the payload updater runs (or does
 # not, when EMBER_NO_AUTOUPDATE=1).
 
@@ -45,20 +45,20 @@ s = socket.socket(socket.AF_UNIX)
 s.bind(sys.argv[1])
 PY
 EMBERDIR="$HOME/.local/share/ember"
-LUMEN_DIR="$HOME/.local/share/Lumen"
-UNIT="$XDG_CONFIG_HOME/systemd/user/lumen.service"
+SIDECAR_DIR="$HOME/.local/share/sidecar"
+UNIT="$XDG_CONFIG_HOME/systemd/user/sidecar.service"
 
-mkdir -p "$EMBERDIR" "$LUMEN_DIR"
+mkdir -p "$EMBERDIR" "$SIDECAR_DIR"
 printf 'so'  >"$EMBERDIR/ember-core.so"
 printf 'inj' >"$EMBERDIR/ember-library-inject.so"
 
-# Fake Lumen: records that it was started, then exits.
-LUMEN_RAN="$WORK/lumen-ran"
-cat >"$LUMEN_DIR/lumen" <<EOF
+# Fake sidecar: records that it was started, then exits.
+SIDECAR_RAN="$WORK/sidecar-ran"
+cat >"$SIDECAR_DIR/sidecar" <<EOF
 #!/bin/sh
-echo "lumen ran" >> "$LUMEN_RAN"
+echo "sidecar ran" >> "$SIDECAR_RAN"
 EOF
-chmod 755 "$LUMEN_DIR/lumen"
+chmod 755 "$SIDECAR_DIR/sidecar"
 
 # Fake updater, off unless a case turns it on.
 UPDATER_RAN="$WORK/updater-ran"
@@ -100,7 +100,7 @@ WRAP="$EMBERDIR/path/steam"
 [ -x "$WRAP" ] || { echo "wrapper not generated" >&2; exit 1; }
 
 reset() {
-	rm -rf "$XDG_CONFIG_HOME/systemd" "$LUMEN_DIR/lumen.log" "$LUMEN_RAN" "$UPDATER_RAN" "$SYSTEMCTL_CALLS" "$SYSTEMCTL_ENABLED"
+	rm -rf "$XDG_CONFIG_HOME/systemd" "$SIDECAR_DIR/sidecar.log" "$SIDECAR_RAN" "$UPDATER_RAN" "$SYSTEMCTL_CALLS" "$SYSTEMCTL_ENABLED"
 	mkdir -p "$XDG_CONFIG_HOME/systemd/user"
 }
 run_wrapper() {
@@ -108,27 +108,27 @@ run_wrapper() {
 	sleep 0.4  # the sidecar and updater are started detached
 }
 
-echo "== no service: wrapper starts Lumen and logs it"
+echo "== no service: wrapper starts sidecar and logs it"
 reset
 run_wrapper
-[ -f "$LUMEN_RAN" ] && ok "Lumen started by the wrapper" || bad "Lumen was not started"
-grep -q 'starting Lumen' "$LUMEN_DIR/lumen.log" 2>/dev/null \
-	&& ok "launch recorded in lumen.log" || bad "nothing written to lumen.log"
+[ -f "$SIDECAR_RAN" ] && ok "sidecar started by the wrapper" || bad "sidecar was not started"
+grep -q 'starting sidecar' "$SIDECAR_DIR/sidecar.log" 2>/dev/null \
+	&& ok "launch recorded in sidecar.log" || bad "nothing written to sidecar.log"
 
 echo "== enabled service: wrapper leaves the sidecar to systemd"
 reset
 : >"$UNIT"
 touch "$SYSTEMCTL_ENABLED"
 run_wrapper
-grep -q 'user start lumen.service' "$SYSTEMCTL_CALLS" 2>/dev/null \
+grep -q 'user start sidecar.service' "$SYSTEMCTL_CALLS" 2>/dev/null \
 	&& ok "systemd asked to start the unit" || bad "systemd was not asked to start the unit"
-[ -f "$LUMEN_RAN" ] && bad "wrapper started a second sidecar" || ok "no second sidecar"
+[ -f "$SIDECAR_RAN" ] && bad "wrapper started a second sidecar" || ok "no second sidecar"
 
 echo "== service disabled again: wrapper takes over"
 reset
 : >"$UNIT"
 run_wrapper
-[ -f "$LUMEN_RAN" ] && ok "Lumen started by the wrapper" || bad "Lumen was not started"
+[ -f "$SIDECAR_RAN" ] && ok "sidecar started by the wrapper" || bad "sidecar was not started"
 
 echo "== payload updater runs in the background"
 reset
@@ -142,7 +142,7 @@ EMBER_NO_AUTOUPDATE=1 run_wrapper
 
 echo
 if [ "$FAIL" -ne 0 ]; then
-	echo "test-wrapper-lumen: $PASS passed, $FAIL failed" >&2
+	echo "test-wrapper-sidecar: $PASS passed, $FAIL failed" >&2
 	exit 1
 fi
-echo "test-wrapper-lumen: all $PASS passed"
+echo "test-wrapper-sidecar: all $PASS passed"

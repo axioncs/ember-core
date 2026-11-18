@@ -755,7 +755,7 @@ if [ "$GUARD_FAILS" -ge "$EMBER_GUARD_MAX_FAILS" ] || { [ "$guard_client_changed
 			rm -f "$_r/appcache/appinfo.vdf" 2>/dev/null && guard_log "removed $_r/appcache/appinfo.vdf"
 		fi
 	done
-	guard_notify "ember paused itself for this session because Steam kept failing to start. Steam is running normally - injection is retried the next time you reboot, or right away if you update the plugin from the LuaTools menu."
+	guard_notify "ember paused itself for this session because Steam kept failing to start. Steam is running normally - injection is retried the next time you reboot, or right away if you update the plugin from the ember menu."
 	guard_log "recovery mode latched for this session; Steam will launch unhooked until the next session or a payload update"
 	ember_exec_vanilla "$@"
 fi

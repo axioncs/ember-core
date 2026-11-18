@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Thin CLI over desktop-coverage.lib.sh. Installed to $EMBERDIR; invoked by the
-# wrapper/Lumen (--user), setup (--system), and the user service (--guardian).
+# wrapper/sidecar (--user), setup (--system), and the user service (--guardian).
 # Legacy --user calls remain best-effort; guardian failures are explicit.
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 : "${WRAPPER:=$HOME/.local/share/ember/path/steam}"
@@ -63,7 +63,7 @@ case "$1" in
 	--user)
 		dc_run --user || true
 		# Also converge the generated-autostart drop-in on the per-launch path.
-		# The wrapper/Lumen call this every injected launch, so even when the
+		# The wrapper/sidecar call this every injected launch, so even when the
 		# systemd user units are inert (installed while systemctl --user was
 		# unreachable), a single injected launch still creates the cold-boot
 		# closure. Best-effort: never fail a launch.

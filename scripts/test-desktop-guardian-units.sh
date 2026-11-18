@@ -348,7 +348,7 @@ check "late autostart drop-in preserves ordinary flag" \
   "ExecStart=\"$CLI_WRAPPER\" -silent" \
   "$(sed -n '/^ExecStart=.* -silent$/p' "$CLI_DROPIN" 2>/dev/null)"
 
-# The per-launch --user path (invoked by the wrapper/Lumen every injected launch)
+# The per-launch --user path (invoked by the wrapper/sidecar every injected launch)
 # must also converge the generated-autostart drop-in. Otherwise, when the systemd
 # user units are inert (e.g. installed while systemctl --user was unreachable),
 # nothing ever creates the cold-boot closure and injection is lost after reboot.

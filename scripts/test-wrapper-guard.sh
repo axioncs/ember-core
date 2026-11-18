@@ -7,7 +7,7 @@
 # Why this exists
 # ---------------
 # In gamescope Game Mode the session supervisor relaunches Steam every time it
-# exits. If the injected stack (ember/CloudRedirect/Lumen) is incompatible
+# exits. If the injected stack (ember/CloudRedirect/sidecar) is incompatible
 # with a freshly-updated Steam client and stalls the engine, the device loops
 # forever and the user can never reach Desktop Mode to update. The wrapper must
 # detect repeated STARTUP CRASHES and LATCH into a vanilla launch (no

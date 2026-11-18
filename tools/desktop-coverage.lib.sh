@@ -636,7 +636,7 @@ dc_patch_one() {
 # regular, trusted, executable file so the DE renders it as "Steam". We do NOT
 # create one where the user had none, and we do NOT use a symlink (GNOME shows a
 # symlinked .desktop as the raw filename + an untrusted link emblem). Steam may
-# restore a vanilla copy on a re-bootstrap; the per-launch/Lumen re-assert
+# restore a vanilla copy on a re-bootstrap; the per-launch/sidecar re-assert
 # re-patches it then.
 dc_activate_shortcut() {
 	local shortcut="$1"

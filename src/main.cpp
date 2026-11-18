@@ -203,12 +203,19 @@ static void setup()
 
 	RuntimeDependencies::check();
 
-	if (CefPort::deckyPresent())
+	if (const char* cefOff = std::getenv("EMBER_CEF"); cefOff && *cefOff && std::strcmp(cefOff, "0") == 0)
 	{
 		g_cefKeepDefaultPort = true;
 		g_cefSessionPort = 0;
 		CefPort::removeContract(CefPort::contractPath());
-		g_pLog->info("CEF: Decky Loader detected -> keeping debug port on 8080 (not rewriting); Lumen + Decky share it\n");
+		g_pLog->info("CEF: disabled by EMBER_CEF=0; Steam keeps its own port\n");
+	}
+	else if (CefPort::deckyPresent())
+	{
+		g_cefKeepDefaultPort = true;
+		g_cefSessionPort = 0;
+		CefPort::removeContract(CefPort::contractPath());
+		g_pLog->info("CEF: Decky Loader detected -> keeping debug port on 8080 (not rewriting); the sidecar + Decky share it\n");
 	}
 	else
 	{

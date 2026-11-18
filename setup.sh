@@ -19,7 +19,7 @@ SYS_AUTOSTART="/etc/xdg/autostart/steam.desktop"
 EMBER_TAG="X-Ember-Patched=true"
 
 # Desktop-coverage logic (scan + patch every *steam*.desktop, blindagens,
-# restore) lives in one sourceable lib shared with the wrapper and Lumen. Source
+# restore) lives in one sourceable lib shared with the wrapper. Source
 # the in-repo copy at install time so dc_run / dc_restore_all are available here.
 WRAPPER="$EMBERDIR/path/steam"
 DC_TAG="$EMBER_TAG"
@@ -307,7 +307,7 @@ install_ember()
 	mkdir -p "$EMBERDIR" || exit 1
 	cp -v ./bin/* "$EMBERDIR/" | sed "s|^|   ${MUTED}${NC}|"
 	# Desktop-coverage helper (scan + patch all *steam*.desktop). Shipped in the
-	# release; copied next to the wrapper so the wrapper and Lumen can invoke it.
+	# release; copied next to the wrapper so the wrapper can invoke it.
 	install -m 0644 ./tools/desktop-coverage.lib.sh "$EMBERDIR/desktop-coverage.lib.sh" 2>/dev/null || \
 		cp ./tools/desktop-coverage.lib.sh "$EMBERDIR/desktop-coverage.lib.sh"
 	install -m 0644 ./tools/launcher-shim.lib.sh "$EMBERDIR/launcher-shim.lib.sh" 2>/dev/null || \
@@ -548,7 +548,7 @@ fi
 #
 # In a gamescope "Game Mode" session the supervisor relaunches Steam every time
 # it exits. If our injected stack (ember via LD_AUDIT / CloudRedirect via
-# LD_PRELOAD / the Lumen sidecar) goes incompatible with a freshly-updated Steam
+# LD_PRELOAD / the sidecar) goes incompatible with a freshly-updated Steam
 # client and stalls the engine, the device loops on the splash forever and the
 # user can never reach Desktop Mode to update. This guard counts boots that
 # CRASHED AT STARTUP (Steam wrote an assert/crash minidump within the boot's
@@ -641,7 +641,7 @@ guard_client_fp() {
 guard_fingerprint() {
 	for _f in "$EMBERDIR/ember-core.so" \
 	          "$HOME/.local/share/CloudRedirect/cloud_redirect.so" \
-	          "$HOME/.local/share/Lumen/lumen"; do
+	          "$HOME/.config/ember/sidecar"; do
 		if [ -e "$_f" ]; then
 			stat -c '%s:%Y' "$_f" 2>/dev/null || stat -f '%z:%m' "$_f" 2>/dev/null || printf '?'
 		else
@@ -855,47 +855,6 @@ if [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; then
 	done
 fi
 
-# Lumen (millennium-less LuaTools bridge): ensure Steam's CEF remote-debugging
-# endpoint is enabled, then launch the Lumen sidecar DETACHED and WITHOUT the
-# loader env (it must use its own static libs, not Steam's 32-bit runtime).
-# Lumen injects the LuaTools frontend via CDP and hosts the backend in-process.
-# Single-instance guarded so a second wrapper invocation doesn't stack sidecars.
-LUMEN_DIR="$HOME/.local/share/Lumen"
-# luatools-moon can install a user service that keeps Lumen around for every
-# Steam launch, including launchers that never touch this wrapper. When that
-# unit is enabled it owns the sidecar; starting another one from here would just
-# race it to Lumen's own singleton lock.
-LUMEN_UNIT="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/lumen.service"
-lumen_owned_by_service=0
-# A session bus is the other half of "systemd can start it": without one, an
-# enabled unit would never come up and the sidecar would simply be missing.
-if [ -f "$LUMEN_UNIT" ] && [ -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/bus" ] \
-   && command -v systemctl >/dev/null 2>&1 \
-   && systemctl --user is-enabled --quiet lumen.service >/dev/null 2>&1; then
-	lumen_owned_by_service=1
-	# It is normally up already; nudge it if it stopped (it idles out after a
-	# long Steam-free stretch, or gave up after a crash loop).
-	systemctl --user is-active --quiet lumen.service >/dev/null 2>&1 \
-		|| systemctl --user start lumen.service >/dev/null 2>&1 &
-fi
-if [ "$lumen_owned_by_service" = 0 ] && [ -x "$LUMEN_DIR/lumen" ] \
-   && ! pgrep -f "$LUMEN_DIR/lumen" >/dev/null 2>&1; then
-	touch "$HOME/.steam/steam/.cef-enable-remote-debugging" 2>/dev/null || true
-	touch "$HOME/.steam/debian-installation/.cef-enable-remote-debugging" 2>/dev/null || true
-	# The sidecar's output used to go to /dev/null, so a Lumen that failed to
-	# attach left nothing to look at. Keep a small log instead.
-	lumen_log="$LUMEN_DIR/lumen.log"
-	if [ -f "$lumen_log" ] && [ "$(wc -c <"$lumen_log" 2>/dev/null || echo 0)" -gt 1048576 ]; then
-		mv -f "$lumen_log" "$lumen_log.1" 2>/dev/null || true
-	fi
-	printf '\n--- %s: starting Lumen\n' "$(date '+%F %T' 2>/dev/null)" >>"$lumen_log" 2>/dev/null \
-		|| lumen_log=/dev/null
-	env -u LD_AUDIT -u LD_PRELOAD -u LD_LIBRARY_PATH \
-	    LUMEN_BACKEND_DIR="$LUMEN_DIR/luatools/backend" \
-	    LUMEN_LUA_DIR="$LUMEN_DIR/lua" \
-	    setsid "$LUMEN_DIR/lumen" >>"$lumen_log" 2>&1 < /dev/null &
-fi
-
 # Keep the payload in step with our releases. Steam updates move the things
 # ember finds by pattern matching, and a payload that no longer matches is
 # what makes games stop launching. The updater is throttled, detached and
@@ -949,7 +908,7 @@ EOF
 # NOTE: the user-level autostart override (mirror the system/Steam autostart entry
 # so the desktop session's auto-launch of Steam runs through our wrapper) now lives
 # in the shared coverage lib as dc_seed_autostart_override, invoked from dc_run —
-# so it runs at install AND on every per-launch/Lumen re-assert, and covers ANY
+# so it runs at install AND on every per-launch re-assert, and covers ANY
 # distro that auto-starts Steam via /etc/xdg/autostart (SteamOS/Bazzite and beyond),
 # not just at install time. The old setup_autostart_override/is_autostart_steam_desktop/
 # rewrite_primary_exec_to_wrapper helpers were removed as dead code.

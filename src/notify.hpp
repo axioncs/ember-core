@@ -130,7 +130,7 @@ namespace Notify
 		const char* home = ::getenv("HOME");
 		if (!home || !home[0]) return false;
 		return enqueueGamepadEvent(std::string(home)
-			+ "/.local/share/Lumen/notifications", title, body, timeoutMs);
+			+ "/.config/ember/notifications", title, body, timeoutMs);
 	}
 
 	struct Spec

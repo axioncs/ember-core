@@ -251,7 +251,7 @@ namespace CefPort
 		{
 			return "";
 		}
-		return std::string(home) + "/.local/share/Lumen/cef_port";
+		return std::string(home) + "/.config/ember/cef_port";
 	}
 
 	inline bool deckyPresent(const std::string& home)

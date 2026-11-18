@@ -54,11 +54,24 @@ bool check()
 		const char* pathEnv = std::getenv("PATH");
 		std::string effectivePath = pathEnv ? pathEnv : "";
 
-		if (access("/run/host/usr/bin", F_OK) == 0)
-		{
+		const auto prepend = [&effectivePath](const char* directory) {
+			if (access(directory, F_OK) != 0) return;
 			if (!effectivePath.empty()) effectivePath += ':';
-			effectivePath += "/run/host/usr/bin:/run/host/bin";
-		}
+			effectivePath += directory;
+		};
+
+		prepend("/run/host/usr/bin");
+		prepend("/run/host/bin");
+
+		// On NixOS the client runs in an FHS container whose PATH is
+		// /run/wrappers/bin:/usr/bin plus whatever the wrapper passed in. The
+		// user's tools live in the system profile, which the container does not
+		// mount at /usr/bin, so a check that reads only the inherited PATH
+		// reports every tool as missing while the command line works. The
+		// profile directories are where those tools actually are.
+		prepend("/run/current-system/sw/bin");
+		prepend("/etc/profiles/per-user/current/bin");
+
 		const std::string missing = missingToolsOnPath(effectivePath.c_str());
 		available = missing.empty();
 		if (!available && g_pLog)

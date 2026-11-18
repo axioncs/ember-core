@@ -174,14 +174,14 @@ void CLog::notifyUser(UserMsg msg, const std::string& detail)
 	}
 
 	const std::string cmd =
-		Notify::buildCommandRaw("ember-moon-x64", shown, timeoutMs, "normal");
+		Notify::buildCommandRaw("ember", shown, timeoutMs, "normal");
 
-	(void)Notify::enqueueGamepadEventForUser("ember-moon-x64", shown, timeoutMs);
+	(void)Notify::enqueueGamepadEventForUser("ember", shown, timeoutMs);
 	const int rc = system((cmd + " >/dev/null 2>&1").c_str());
 	if (rc != 0)
 	{
 
-		(void)sendDbusNotification("ember-moon-x64", "ember-moon-x64",
+		(void)sendDbusNotification("ember", "ember",
 		                           shown.c_str(), timeoutMs);
 	}
 }

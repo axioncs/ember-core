@@ -192,7 +192,7 @@ namespace Notify
 		cmd += std::to_string(s.timeoutMs);
 		cmd += " -u \"";
 		cmd += s.urgency;
-		cmd += "\" \"ember-moon\" \"";
+		cmd += "\" \"ember\" \"";
 		cmd += shellEscapeDoubleQuoted(body);
 		cmd += "\"";
 		return cmd;

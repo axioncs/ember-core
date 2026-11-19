@@ -2,6 +2,7 @@
 
 #include "cloudhttp.hpp"
 
+#include "../ascii.hpp"
 #include "../log.hpp"
 
 #include <arpa/inet.h>
@@ -10,7 +11,6 @@
 #include <unistd.h>
 
 #include <algorithm>
-#include <cctype>
 #include <cerrno>
 #include <cstring>
 #include <fstream>
@@ -79,8 +79,12 @@ namespace
 
 	std::string toLower(std::string value)
 	{
+		// The ASCII helper, not the locale-aware ctype call: this runs inside
+		// the injected library, where the C locale is not installed yet and
+		// that call can read uninitialised global state. Every other
+		// lowercasing path in the tree already uses this helper.
 		std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
-			return static_cast<char>(std::tolower(c));
+			return static_cast<char>(Ascii::toLower(c));
 		});
 		return value;
 	}

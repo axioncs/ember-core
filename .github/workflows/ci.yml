@@ -39,9 +39,24 @@ jobs:
             echo "::error::no test targets found in the Makefile"
             exit 1
           fi
-          echo "running ${#targets[@]} test target(s)"
-          failed=()
+
+          # test-cmclient-live queries Steam's real CM network, so it fails on a
+          # runner with no route to Valve rather than on a defect. Excluded by
+          # name with the reason stated, instead of left in to go red at random
+          # and teach everyone to ignore the badge.
+          skip_re='^test-cmclient-live$'
+          selected=()
           for t in "${targets[@]}"; do
+            if [[ "$t" =~ $skip_re ]]; then
+              echo "  skip $t (requires live Steam CM network)"
+            else
+              selected+=("$t")
+            fi
+          done
+
+          echo "running ${#selected[@]} test target(s)"
+          failed=()
+          for t in "${selected[@]}"; do
             if make -s -j"$(nproc)" "$t" >"/tmp/$t.log" 2>&1; then
               echo "  ok   $t"
             else
@@ -58,4 +73,4 @@ jobs:
             done
             exit 1
           fi
-          echo "all ${#targets[@]} test target(s) passed"
+          echo "all ${#selected[@]} test target(s) passed"

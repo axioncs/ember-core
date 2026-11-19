@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -525,6 +526,21 @@ bool CConfig::loadSettings()
 	gameTitles = getMap<uint32_t, std::string>(node, "GameTitles");
 	subscriptionTimestamps = getMap<uint32_t, uint32_t>(node, "SubscriptionTimestamps");
 	steamIdOverride = getMap<AppId_t, uint64_t>(node, "SteamIdOverride");
+
+	// Environment wins over the file: a declarative layer can set a value
+	// without rewriting a config the user owns. Parsed after the YAML so the
+	// option beats whatever config.yaml says.
+	if (const char* v = std::getenv("EMBER_CLOUD"))
+	{
+		if (std::strcmp(v, "0") == 0 || std::strcmp(v, "no") == 0)
+		{
+			cloud.set(false);
+		}
+		else if (std::strcmp(v, "1") == 0 || std::strcmp(v, "yes") == 0)
+		{
+			cloud.set(true);
+		}
+	}
 
 	const auto idleStatusNode = node["IdleStatus"];
 	if (idleStatusNode)

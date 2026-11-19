@@ -1,0 +1,61 @@
+name: ci
+
+# Every change builds the library and runs the C++ test suite.
+#
+# The suite is the point: the Makefile carries 76 test targets and, until this
+# workflow existed, nothing ran any of them. Two defects reached users that a
+# single `make test-*` would have caught — a helper written in python3 that the
+# Steam container does not ship, and a helper that wrote into a read-only store
+# path. Both were invisible to a build.
+
+on:
+  push:
+    branches: [ember, main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            g++ make ca-certificates pkg-config \
+            libssl-dev zlib1g-dev libcurl4-openssl-dev
+
+      - name: build the library
+        run: make -j"$(nproc)" bin/ember-core.so bin/ember-library-inject.so
+
+      # Enumerated from the Makefile so a new test target is picked up without
+      # editing this file, and so the job fails loudly if the list is empty.
+      - name: run the test suite
+        run: |
+          set -eu
+          mapfile -t targets < <(grep -oE '^test-[a-z0-9-]+:' Makefile | tr -d ':')
+          if [ "${#targets[@]}" -eq 0 ]; then
+            echo "::error::no test targets found in the Makefile"
+            exit 1
+          fi
+          echo "running ${#targets[@]} test target(s)"
+          failed=()
+          for t in "${targets[@]}"; do
+            if make -s -j"$(nproc)" "$t" >"/tmp/$t.log" 2>&1; then
+              echo "  ok   $t"
+            else
+              echo "  FAIL $t"
+              failed+=("$t")
+            fi
+          done
+          if [ "${#failed[@]}" -ne 0 ]; then
+            echo "::error::${#failed[@]} test target(s) failed"
+            printf '  %s\n' "${failed[@]}"
+            for t in "${failed[@]}"; do
+              echo "----- $t -----"
+              tail -n 40 "/tmp/$t.log"
+            done
+            exit 1
+          fi
+          echo "all ${#targets[@]} test target(s) passed"

@@ -22,11 +22,14 @@ namespace AuditBinding
 		if (name == nullptr)
 			return Symbol::None;
 
+		// Matched before the first-character dispatch: this name begins with
+		// 'e' like the exec family, so routing on name[0] alone can never
+		// reach it and the symbol goes unrecognised.
+		if (std::strcmp(name, "ember_local_stats_epoch_v1") == 0)
+			return Symbol::LocalStatsEpoch;
+
 		switch (name[0])
 		{
-			case 's':
-				return std::strcmp(name, "ember_local_stats_epoch_v1") == 0
-					? Symbol::LocalStatsEpoch : Symbol::None;
 			case 'e':
 			{
 				const std::size_t length = std::strlen(name);

@@ -384,6 +384,7 @@ static uint32_t hkSteamEngine_ProcessIPCFrame(
 
 	EIPCCmd cmd{};
 	std::memcpy(&cmd, pBufIn->mem.base, sizeof(cmd));
+	g_pLog->info("hkIPC: enter pipe=%u cmd=%u\n", hPipe, static_cast<unsigned int>(cmd));
 	const bool log = g_config.extendedLogging.get();
 	if (log)
 	{
@@ -418,12 +419,20 @@ static uint32_t hkSteamEngine_ProcessIPCFrame(
 		if (pBufOut && pBufOut->hasBytes(1 + sizeof(CSteamId)) &&
 			interface == EIPCInterface::User && function == 0xD6FC3200)
 		{
+			g_pLog->info(
+				"hkIPC: user 0x%08x out base=%p alloc=%u put=%d get=%d\n",
+				function, pBufOut->mem.base, pBufOut->mem.alloc,
+				pBufOut->put, pBufOut->get);
 			EIPCExitCode exitCode{};
 			std::memcpy(&exitCode, pBufOut->mem.base, sizeof(exitCode));
 			if (exitCode == EIPCExitCode::Success)
 			{
 				CSteamId id{};
 				std::memcpy(&id, pBufOut->mem.base + 1, sizeof(id));
+				g_pLog->info(
+					"hkIPC: exit ok, id=%llu set=%u\n",
+					static_cast<unsigned long long>(id.steamId64),
+					id.isSet() ? 1u : 0u);
 				if (!g_currentSteamId.isSet() && id.isSet())
 				{
 					g_currentSteamId = id;
@@ -433,6 +442,13 @@ static uint32_t hkSteamEngine_ProcessIPCFrame(
 				const CSteamId newId =
 					hkClientUser_GetSteamId(g_currentSteamId);
 				std::memcpy(pBufOut->mem.base + 1, &newId, sizeof(newId));
+				g_pLog->info(
+					"hkIPC: wrote newId=%llu\n",
+					static_cast<unsigned long long>(newId.steamId64));
+			}
+			else
+			{
+				g_pLog->info("hkIPC: exit code %u, no rewrite\n", static_cast<unsigned int>(exitCode));
 			}
 		}
 	}
@@ -473,6 +489,7 @@ static uint32_t hkSteamEngine_ProcessIPCFrame(
 			g_processMap.erase(hPipe);
 		}
 	}
+	g_pLog->info("hkIPC: leave pipe=%u cmd=%u ret=%u\n", hPipe, static_cast<unsigned int>(cmd), ret);
 	return ret;
 }
 

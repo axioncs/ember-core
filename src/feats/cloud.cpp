@@ -53,7 +53,7 @@ namespace Cloud
 
 		g_tried = true;
 
-		if (g_config.disableCloud.get())
+		if (!g_config.cloud.get())
 		{
 			g_pLog->info("Cloud: disabled by config\n");
 			return false;

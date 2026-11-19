@@ -63,17 +63,17 @@ if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != "dumb" ]; then
 	NC=$'\033[0m'
 
 	if [ "$HAS_256" = 1 ]; then
-		MOON=$'\033[38;5;153m'
-		NIGHT=$'\033[38;5;75m'
-		HALO=$'\033[38;5;231m'
+		ACCENT=$'\033[38;5;153m'
+		DIM2=$'\033[38;5;75m'
+		BRIGHT=$'\033[38;5;231m'
 		MUTED=$'\033[38;5;110m'
 		GREEN=$'\033[38;5;114m'
 		YELLOW=$'\033[38;5;221m'
 		RED=$'\033[38;5;203m'
 	else
-		MOON=$'\033[1;34m'
-		NIGHT=$'\033[0;36m'
-		HALO=$'\033[1;37m'
+		ACCENT=$'\033[1;34m'
+		DIM2=$'\033[0;36m'
+		BRIGHT=$'\033[1;37m'
 		MUTED=$'\033[0;34m'
 		GREEN=$'\033[0;32m'
 		YELLOW=$'\033[0;33m'
@@ -81,31 +81,31 @@ if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != "dumb" ]; then
 	fi
 else
 	BOLD=""; DIM=""; NC=""
-	MOON=""; NIGHT=""; HALO=""; MUTED=""
+	ACCENT=""; DIM2=""; BRIGHT=""; MUTED=""
 	GREEN=""; YELLOW=""; RED=""
 fi
 
 print_banner() {
 	echo ""
-	echo -e "${MOON}${BOLD}"
+	echo -e "${ACCENT}${BOLD}"
 	echo "┌─────────────────────────────────────────────────────────┐"
-	printf "│             ${HALO}${BOLD}◯${NC}${MOON}${BOLD}  ember installer                   │\n"
+	printf "│             ${BRIGHT}${BOLD}◯${NC}${ACCENT}${BOLD}  ember installer                   │\n"
 	echo "└─────────────────────────────────────────────────────────┘"
 	echo -e "${NC}"
 }
 
 print_section() {
 	echo ""
-	echo -e "${NIGHT}─────────────────────────────────────────────────────────${NC}"
-	echo -e "${NIGHT}${BOLD}❯ $1${NC}"
-	echo -e "${NIGHT}─────────────────────────────────────────────────────────${NC}"
+	echo -e "${DIM2}─────────────────────────────────────────────────────────${NC}"
+	echo -e "${DIM2}${BOLD}❯ $1${NC}"
+	echo -e "${DIM2}─────────────────────────────────────────────────────────${NC}"
 }
 
-log_info()    { echo -e "${NIGHT}→${NC} $1"; }
+log_info()    { echo -e "${DIM2}→${NC} $1"; }
 log_success() { echo -e "${GREEN}✓${NC} $1"; }
 log_warn()    { echo -e "${YELLOW}⚠${NC} $1"; }
 log_error()   { echo -e "${RED}✗${NC} $1"; }
-log_step()    { echo -e "${MOON}•${NC} $1"; }
+log_step()    { echo -e "${ACCENT}•${NC} $1"; }
 
 print_install_complete() {
 	echo ""

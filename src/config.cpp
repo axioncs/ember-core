@@ -387,6 +387,7 @@ bool CConfig::loadSettings()
 	fakeEmail = getSetting<std::string>(node, "FakeEmail", "");
 	fakeWalletBalance = getSetting<int32_t>(node, "FakeWalletBalance", 0);
 	disableCloud = getSetting<bool>(node, "DisableCloud", true);
+	cloud = getSetting<bool>(node, "Cloud", true);
 	autoUpdateApps = getSetting<bool>(node, "AutoUpdateApps", true);
 	DonateSettings donateSettings;
 	const YAML::Node donateNode = node["Donate"];

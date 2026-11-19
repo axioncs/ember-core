@@ -1,5 +1,6 @@
 
 #include "manifestcode.hpp"
+#include "cloudtransport.hpp"
 
 #include "depotkey.hpp"
 #include "manifestid.hpp"
@@ -293,6 +294,16 @@ void dispatchSend(uint32_t eMsg,
 		return;
 	}
 	g_pLog->debug("WebSocket service method send: %s\n", hdr.target_job_name().c_str());
+
+	// Cloud saves. The request goes out either way: the client needs a
+	// response frame to attach our answer to, and Valve's refusal is what
+	// produces that frame. The answer is substituted on the way back in.
+	if (CloudTransport::onSend(hdr.jobid_source(), hdr.target_job_name().c_str(),
+	                           pBody, cbBody))
+	{
+		return;
+	}
+
 	const auto h = fnvHash(hdr.target_job_name().c_str());
 	switch (h)
 	{
@@ -361,6 +372,27 @@ void dispatchRecv(uint32_t eMsg,
 		if (header.ParseFromArray(pHdr, cbHdr) && header.has_jobid_target())
 		{
 			resolveDonorResponse(header.jobid_target(), header, pBody, cbBody);
+
+			std::vector<uint8_t> cloudBody;
+			uint32_t cloudEResult = 0;
+			if (CloudTransport::onRecv(header.jobid_target(), cloudBody, cloudEResult)
+			    && cloudBody.size() <= sizeof(g_RxBody)
+			    && header.ByteSizeLong() <= sizeof(g_RxHdr))
+			{
+				header.set_eresult(cloudEResult);
+				const auto len = static_cast<uint32_t>(header.ByteSizeLong());
+				if (header.SerializeToArray(g_RxHdr, len))
+				{
+					g_RxHdrLen = len;
+					if (!cloudBody.empty())
+					{
+						std::memcpy(g_RxBody, cloudBody.data(), cloudBody.size());
+					}
+					g_RxBodyLen = static_cast<uint32_t>(cloudBody.size());
+					g_PatchRxHdr = true;
+					g_PatchRx = true;
+				}
+			}
 		}
 	}
 	if (eMsg == EMSG_REQUEST_USERSTATS_RESPONSE || eMsg == kEMsgServiceMethodResponse)
@@ -523,6 +555,7 @@ void resetSession()
 	}
 	g_DonorSendCv.notify_all();
 	ManifestFetch::resetSessionState();
+	CloudTransport::reset();
 }
 
 bool hkBBuildAndAsyncSendFrame(void* pConnection,

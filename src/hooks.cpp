@@ -898,6 +898,16 @@ static bool hkClientRemoteStorage_IsCloudEnabledForApp(void* pClientRemoteStorag
 		enabled
 	);
 
+	// Cloud saves for added apps. An added app has no PICS cloud entry, so the
+	// client answers "no" and never asks for a changelist — which is why ember
+	// answers the Cloud.* calls itself. Saying yes here is what makes the
+	// transport reachable at all.
+	if (!enabled && g_config.cloud.get() && g_config.isAddedAppId(appId))
+	{
+		g_pLog->infoOnce("Cloud: enabled for added app %u\n", appId);
+		return true;
+	}
+
 	if (Apps::shouldDisableCloud(appId))
 	{
 		g_pLog->infoOnce("Disabled cloud for %u\n", appId);

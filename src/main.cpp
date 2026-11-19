@@ -26,6 +26,8 @@
 #include "feats/cmclient.hpp"
 #include "feats/apps.hpp"
 #include "feats/cefport.hpp"
+#include "feats/cloud.hpp"
+#include "feats/cloudtransport.hpp"
 #include "feats/depotkey.hpp"
 #include "feats/hotreload.hpp"
 #include "feats/manifestid.hpp"
@@ -99,6 +101,8 @@ static void unload()
 	if (!g_pLog) return;
 	ManifestDonor::stop();
 	ManifestCode::resetSession();
+	CloudTransport::reset();
+	Cloud::shutdown();
 	HotReload::shutdown();
 	Hooks::remove();
 
@@ -529,6 +533,10 @@ static void load()
 			g_pLog->debug("SteamStub: could not resolve ember-core.so path; feature disabled\n");
 		}
 	}
+
+	// Cloud saves. Before the transport hooks run, so the first Cloud.* call
+	// is already answered rather than after the first login.
+	Cloud::init();
 
 	{
 		BootProf::Span importProfile(g_pLog.get(), "lua_imports");

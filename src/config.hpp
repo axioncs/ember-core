@@ -130,6 +130,7 @@ public:
 	MTVariable<int32_t> fakeWalletBalance;
 	MTVariable<unsigned int> logLevel;
 	MTVariable<bool> patternCache;
+	MTVariable<bool> cloud;
 
 	MTVariable<bool> asyncProvision;
 	MTVariable<bool> extendedLogging;

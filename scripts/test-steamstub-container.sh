@@ -148,9 +148,12 @@ fi
     && ok "writable stage received the Steamless kit" \
     || bad "writable stage is missing Steamless.CLI.exe"
 
-[ -f "$STAGE/Plugins/Steamless.API.dll" ] \
-    && ok "Steamless.API.dll staged under Plugins/" \
-    || bad "Steamless.API.dll missing from the staged Plugins/"
+# The property that matters: the CLI resolves Steamless.API.dll beside itself,
+# not under Plugins/. A stage that only has it in Plugins/ looks correct here
+# and still fails at runtime, so assert the top level explicitly.
+[ -f "$STAGE/Steamless.API.dll" ] \
+    && ok "Steamless.API.dll sits beside the CLI (what the CLI actually loads)" \
+    || bad "Steamless.API.dll is not beside the CLI; Steamless will fail at runtime"
 
 [ -f "$STAGE/Steamless.CLI.exe" ] \
     && ok "Steamless.CLI.exe staged and runnable" \

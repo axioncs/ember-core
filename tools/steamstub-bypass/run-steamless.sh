@@ -167,24 +167,37 @@ if [ "$PREWARM" -eq 0 ]; then
     # The bundled kit may live in a read-only store path, so never write
     # beside it: stage a writable copy under the ember data dir and run
     # from there instead.
+    stage_steamless_kit() {
+        STAGING="${EMBER_STEAMLESS_STAGE:-$HOME/.local/share/ember/steamless-bin}"
+        mkdir -p "$STAGING" || die "cannot create writable Steamless stage at $STAGING" 4
+        # -L dereferences, --no-preserve drops the read-only modes the
+        # store ships with: the stage has to stay writable so a later
+        # run can refresh it, and so cleanup can remove it.
+        cp -rfL --no-preserve=mode,ownership,timestamps \
+            "$STEAMLESS_HOME/." "$STAGING/" 2>/dev/null || true
+        chmod -R u+w "$STAGING" 2>/dev/null || true
+        [ -f "$STAGING/Steamless.CLI.exe" ] \
+            || die "staged Steamless kit is incomplete at $STAGING" 4
+        # The CLI resolves the API dll beside itself, not under Plugins/, so
+        # staging alone is not enough: without this the run starts and then
+        # dies inside Steamless with the DRM still applied.
+        if [ ! -f "$STAGING/Steamless.API.dll" ] \
+           && [ -f "$STAGING/Plugins/Steamless.API.dll" ]; then
+            cp "$STAGING/Plugins/Steamless.API.dll" "$STAGING/Steamless.API.dll"
+        fi
+        [ -f "$STAGING/Steamless.API.dll" ] \
+            || die "staged kit has no Steamless.API.dll beside the CLI" 4
+        log "staged Steamless kit into writable $STAGING"
+        STEAMLESS_HOME="$STAGING"
+        STEAMLESS_CLI="$STEAMLESS_HOME/Steamless.CLI.exe"
+    }
+
     if [ ! -f "$STEAMLESS_HOME/Steamless.API.dll" ] \
        && [ -f "$STEAMLESS_HOME/Plugins/Steamless.API.dll" ]; then
         if [ -w "$STEAMLESS_HOME" ]; then
             cp "$STEAMLESS_HOME/Plugins/Steamless.API.dll" "$STEAMLESS_HOME/Steamless.API.dll"
         else
-            STAGING="${EMBER_STEAMLESS_STAGE:-$HOME/.local/share/ember/steamless-bin}"
-            mkdir -p "$STAGING" || die "cannot create writable Steamless stage at $STAGING" 4
-            # -L dereferences, --no-preserve drops the read-only modes the
-            # store ships with: the stage has to stay writable so a later
-            # run can refresh it, and so cleanup can remove it.
-            cp -rfL --no-preserve=mode,ownership,timestamps \
-                "$STEAMLESS_HOME/." "$STAGING/" 2>/dev/null || true
-            chmod -R u+w "$STAGING" 2>/dev/null || true
-            [ -f "$STAGING/Steamless.CLI.exe" ] \
-                || die "staged Steamless kit is incomplete at $STAGING" 4
-            log "staged Steamless kit into writable $STAGING"
-            STEAMLESS_HOME="$STAGING"
-            STEAMLESS_CLI="$STEAMLESS_HOME/Steamless.CLI.exe"
+            stage_steamless_kit
         fi
     fi
 fi

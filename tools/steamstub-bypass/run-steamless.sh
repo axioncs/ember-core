@@ -94,48 +94,52 @@ if [ "$PREWARM" -eq 0 ]; then
     # Quick exit if neither marker is present, to avoid the 5-30 s
     # Wine startup cost on plain non-stub'd binaries.
     #
-    # Detection is done entirely in python3 (already a hard dependency of
-    # this script) so it depends on nothing beyond a base install. An
-    # earlier version read the v2 magic via `dd | xxd`; `xxd` ships in
-    # vim-common and is absent from minimal installs (e.g. Fedora), so
-    # under `set -euo pipefail` the missing tool aborted the whole helper
-    # with rc=127 before any signature was examined — silently disabling
-    # DRM removal for every SteamStub title on those distros.
-    stub_kind="$(python3 - "$EXE_PATH" <<'PY'
-import struct, sys
+    # Detection runs on od alone. The helper is forked from inside the
+    # Steam client, so it inherits the runtime container's PATH, which is
+    # a minimal coreutils set with no python3 — a python3-based probe
+    # aborts here with rc=127 and silently disables DRM removal.
+    hex_at() {
+        od -An -v -tx1 -j "$1" -N "$2" "$3" 2>/dev/null | tr -d ' \n'
+    }
 
-def detect(path):
-    with open(path, 'rb') as f:
-        head = f.read(4096)
-    # v2 (x86): 'VLV\0' magic at file offset 0x40.
-    if head[0x40:0x44] == b'VLV\x00':
-        return 'v2'
-    # v3 (x86/x64): no fixed-offset magic; the unpacker header lives in
-    # a PE section named '.bind'. Walking the section table is the
-    # canonical detection (Steamless does the same).
-    if head[:2] != b'MZ':
-        return 'none'
-    e_lfanew = struct.unpack_from('<I', head, 0x3c)[0]
-    if e_lfanew + 0x18 > len(head) or head[e_lfanew:e_lfanew+4] != b'PE\x00\x00':
-        return 'none'
-    nsec    = struct.unpack_from('<H', head, e_lfanew + 6)[0]
-    optsize = struct.unpack_from('<H', head, e_lfanew + 0x14)[0]
-    sec_off = e_lfanew + 0x18 + optsize
-    if sec_off + nsec * 40 > len(head):
-        with open(path, 'rb') as f:
-            head = f.read(sec_off + nsec * 40 + 16)
-    for i in range(nsec):
-        name = head[sec_off + i*40 : sec_off + i*40 + 8].rstrip(b'\x00')
-        if name == b'.bind':
-            return 'v3'
-    return 'none'
+    detect_stub_kind() {
+        local exe="$1" h name rest i
+        local e_lfanew nsec optsize sec_off
 
-try:
-    print(detect(sys.argv[1]))
-except Exception:
-    print('none')
-PY
-)"
+        [ "$(hex_at 64 4 "$exe")" = "564c5600" ] && { echo v2; return; }
+        [ "$(hex_at 0 2 "$exe")" = "4d5a" ] || { echo none; return; }
+
+        h="$(hex_at 60 4 "$exe")"
+        e_lfanew=$(( 16#${h:0:2} | 16#${h:2:2} << 8 | 16#${h:4:2} << 16 | 16#${h:6:2} << 24 ))
+        [ "$(hex_at "$e_lfanew" 4 "$exe")" = "50450000" ] || { echo none; return; }
+
+        h="$(hex_at $((e_lfanew + 6)) 2 "$exe")"
+        nsec=$(( 16#${h:0:2} | 16#${h:2:2} << 8 ))
+        h="$(hex_at $((e_lfanew + 20)) 2 "$exe")"
+        optsize=$(( 16#${h:0:2} | 16#${h:2:2} << 8 ))
+        sec_off=$(( e_lfanew + 24 + optsize ))
+
+        [ "$nsec" -gt 0 ] && [ "$nsec" -le 96 ] || { echo none; return; }
+
+        i=0
+        while [ "$i" -lt "$nsec" ]; do
+            name="$(hex_at $((sec_off + i * 40)) 8 "$exe")"
+            case "$name" in
+                2e62696e64*)
+                    rest="${name:10}"
+                    case "$rest" in
+                        *[!0]*) ;;
+                        *) echo v3; return ;;
+                    esac
+                    ;;
+            esac
+            i=$((i + 1))
+        done
+
+        echo none
+    }
+
+    stub_kind="$(detect_stub_kind "$EXE_PATH")"
     case "$stub_kind" in
         v2)
             log "SteamStub v2 (VLV) signature detected — proceeding"
@@ -159,9 +163,29 @@ if [ "$PREWARM" -eq 0 ]; then
     # Steamless's CLI exe loads Steamless.API.dll from the working
     # directory. Plugins live in Plugins/. If the API dll is only in
     # Plugins/, copy it up so the CLI can find it. Idempotent.
+    #
+    # The bundled kit may live in a read-only store path, so never write
+    # beside it: stage a writable copy under the ember data dir and run
+    # from there instead.
     if [ ! -f "$STEAMLESS_HOME/Steamless.API.dll" ] \
        && [ -f "$STEAMLESS_HOME/Plugins/Steamless.API.dll" ]; then
-        cp "$STEAMLESS_HOME/Plugins/Steamless.API.dll" "$STEAMLESS_HOME/Steamless.API.dll"
+        if [ -w "$STEAMLESS_HOME" ]; then
+            cp "$STEAMLESS_HOME/Plugins/Steamless.API.dll" "$STEAMLESS_HOME/Steamless.API.dll"
+        else
+            STAGING="${EMBER_STEAMLESS_STAGE:-$HOME/.local/share/ember/steamless-bin}"
+            mkdir -p "$STAGING" || die "cannot create writable Steamless stage at $STAGING" 4
+            # -L dereferences, --no-preserve drops the read-only modes the
+            # store ships with: the stage has to stay writable so a later
+            # run can refresh it, and so cleanup can remove it.
+            cp -rfL --no-preserve=mode,ownership,timestamps \
+                "$STEAMLESS_HOME/." "$STAGING/" 2>/dev/null || true
+            chmod -R u+w "$STAGING" 2>/dev/null || true
+            [ -f "$STAGING/Steamless.CLI.exe" ] \
+                || die "staged Steamless kit is incomplete at $STAGING" 4
+            log "staged Steamless kit into writable $STAGING"
+            STEAMLESS_HOME="$STAGING"
+            STEAMLESS_CLI="$STEAMLESS_HOME/Steamless.CLI.exe"
+        fi
     fi
 fi
 

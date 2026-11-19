@@ -283,4 +283,57 @@ namespace CefPort
 		std::error_code ec;
 		std::filesystem::remove(path, ec);
 	}
+
+	inline constexpr const char* kRemoteDebuggingMarker = "/.cef-enable-remote-debugging";
+
+	inline std::string remoteDebuggingMarkerPath()
+	{
+		const char* home = std::getenv("HOME");
+		if (!home || !*home)
+		{
+			return "";
+		}
+		return std::string(home) + "/.local/share/Steam" + kRemoteDebuggingMarker;
+	}
+
+	inline bool enableRemoteDebuggingMarker()
+	{
+		const std::string path = remoteDebuggingMarkerPath();
+		if (path.empty())
+		{
+			return false;
+		}
+		std::error_code ec;
+		const auto parent = std::filesystem::path(path).parent_path();
+		if (!parent.empty())
+		{
+			std::filesystem::create_directories(parent, ec);
+			if (ec)
+			{
+				return false;
+			}
+		}
+		if (std::filesystem::exists(path, ec))
+		{
+			return true;
+		}
+		std::ofstream f(path, std::ios::trunc);
+		if (!f)
+		{
+			return false;
+		}
+		f << "";
+		return static_cast<bool>(f);
+	}
+
+	inline bool remoteDebuggingMarkerPresent()
+	{
+		const std::string path = remoteDebuggingMarkerPath();
+		if (path.empty())
+		{
+			return false;
+		}
+		std::error_code ec;
+		return std::filesystem::exists(path, ec) && !ec;
+	}
 }

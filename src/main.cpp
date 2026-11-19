@@ -223,6 +223,23 @@ static void setup()
 	}
 	else
 	{
+		// Steam only passes --remote-debugging-port to the webhelper when this
+		// marker exists in the Steam root. Without it no port opens, and
+		// cefRewriteArgv below has no flag to rewrite, so the whole UI layer
+		// (store-page badge) has nothing to attach to. Created here rather
+		// than left to the user because nothing else in the stack creates it.
+		if (CefPort::enableRemoteDebuggingMarker())
+		{
+			g_pLog->info("CEF: remote debugging marker in place at %s\n",
+			             CefPort::remoteDebuggingMarkerPath().c_str());
+		}
+		else if (!CefPort::remoteDebuggingMarkerPresent())
+		{
+			g_pLog->warn("CEF: could not create %s; the store-page badge "
+			             "will have no debug endpoint to attach to\n",
+			             CefPort::remoteDebuggingMarkerPath().c_str());
+		}
+
 		g_cefSessionPort = CefPort::resolveSessionPortNoPersist(CefPort::contractPath());
 		if (g_cefSessionPort != 0)
 		{

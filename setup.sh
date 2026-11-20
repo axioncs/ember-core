@@ -37,6 +37,10 @@ if [ -f "$SETUP_DIR/tools/desktop-guardian-units.lib.sh" ]; then
 	# shellcheck source=/dev/null
 	. "$SETUP_DIR/tools/desktop-guardian-units.lib.sh"
 fi
+if [ -f "$SETUP_DIR/tools/ember-units.lib.sh" ]; then
+	# shellcheck source=/dev/null
+	. "$SETUP_DIR/tools/ember-units.lib.sh"
+fi
 
 # ============================================================================
 # Pretty output (colors + box-drawing). Falls back to plain text when stdout
@@ -314,6 +318,10 @@ install_ember()
 		cp ./tools/launcher-shim.lib.sh "$EMBERDIR/launcher-shim.lib.sh"
 	install -m 0644 ./tools/desktop-guardian-units.lib.sh "$EMBERDIR/desktop-guardian-units.lib.sh" 2>/dev/null || \
 		cp ./tools/desktop-guardian-units.lib.sh "$EMBERDIR/desktop-guardian-units.lib.sh"
+	# User units for the badge watcher and the cloud-push timer. Shipped beside
+	# the libs so the uninstaller and a later reinstall can find them.
+	install -m 0644 ./tools/ember-units.lib.sh "$EMBERDIR/ember-units.lib.sh" 2>/dev/null || \
+		cp ./tools/ember-units.lib.sh "$EMBERDIR/ember-units.lib.sh"
 	install -m 0755 ./ensure-desktop-coverage.sh    "$EMBERDIR/ensure-desktop-coverage.sh" 2>/dev/null || \
 		{ cp ./ensure-desktop-coverage.sh "$EMBERDIR/ensure-desktop-coverage.sh"; chmod +x "$EMBERDIR/ensure-desktop-coverage.sh"; }
 	# Payload auto-updater. Runs detached from the wrapper; it only swaps the
@@ -1094,6 +1102,23 @@ setup_path_and_desktop()
 	dgu_install_units; guardian_status=$?
 	[ "$guardian_status" = 1 ] && dgu_enable_units
 	[ "$guardian_status" = 2 ] && log_warn "Could not install all desktop guardian units; user desktop coverage remains active"
+
+	# Badge watcher and cloud-push units. The watcher is enabled by default
+	# because the store-page badge is invisible without it; the cloud timer is
+	# installed but left off, since a timer running `rclone sync` against a
+	# remote the user has not configured produces a journal entry every
+	# interval. `ember cloud setup` + enable is one command when they want it.
+	if command -v ecu_install_units >/dev/null 2>&1; then
+		ecu_install_units; guardian_status=$?
+		if [ "$guardian_status" = 0 ] || [ "$guardian_status" = 1 ]; then
+			ecu_enable_ui_watch
+			ecu_install_cloud_units
+			log_info "Badge watcher enabled; cloud push installed but off"
+			log_info "  enable cloud sync with: systemctl --user enable --now ember-cloud-push.timer"
+		else
+			log_warn "Could not install the ember user units; the store-page badge needs 'ember ui watch'"
+		fi
+	fi
 	dgu_install_autostart_dropins; guardian_status=$?
 	[ "$guardian_status" = 2 ] && log_warn "Could not install all generated-autostart drop-ins; XDG shadows remain active"
 
@@ -1336,6 +1361,10 @@ uninstall()
 	fi
 	if command -v dgu_remove_units >/dev/null 2>&1; then
 		dgu_remove_units || true
+	fi
+	# Badge watcher and cloud-push timer, sentinel-scoped the same way.
+	if command -v ecu_remove_units >/dev/null 2>&1; then
+		ecu_remove_units || true
 	fi
 
 	# Restore every patched/symlinked *steam*.desktop (menu user+system incl. the

@@ -702,6 +702,12 @@ bool CConfig::loadSettings()
 
 		ManifestPins::purgeOrphans(pinMap, addedAppIds.get());
 
+		// Tickets outlive the apps that minted them, and a cached ticket is
+		// only valid for the app it was minted for: handing one to Steam for
+		// any other app is refused at best. Drop the orphans whenever the
+		// added set changes, so no later caller can pick one up.
+		Ticket::purgeOrphans(addedAppIds.get());
+
 		manifestPinsByApp.set(pinMap);
 		manifestPins.set(ManifestPins::flattenDepots(pinMap));
 		lockedApps.set(ManifestPins::lockedAppSet(pinMap));

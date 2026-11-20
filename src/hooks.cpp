@@ -680,7 +680,15 @@ static void* hkClientAppManager_LaunchApp(void* pClientAppManager, uint32_t* pAp
 			a4
 		);
 
-		Ticket::launchApp(*pAppId);
+		// Only apps ember added. Steam keeps its own ownership ticket for
+		// owned apps, and pushing a cached one over it is refused at best
+		// and crashes Steam at worst — the ticket buffer Steam copies from
+		// is only valid for the app it was minted for. SteamStub::onLaunchApp
+		// carries the same gate for the same reason.
+		if (g_config.isAddedAppId(*pAppId))
+		{
+			Ticket::launchApp(*pAppId);
+		}
 		SteamStub::onLaunchApp(*pAppId);
 	}
 

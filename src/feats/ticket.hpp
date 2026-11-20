@@ -65,11 +65,25 @@ public:
 		return true;
 	}
 
+	// A cached ticket is only valid for the app it was minted for. Anything
+	// outside the added set is an orphan: Steam keeps its own ticket for apps
+	// the account owns, so there is nothing for ember to keep here.
+	inline bool isOrphaned(uint32_t appId, const std::unordered_set<uint32_t>& addedAppIds) noexcept
+	{
+		return appId != 0 && !addedAppIds.contains(appId);
+	}
+
 	std::string getTicketDir();
 
 	std::string getTicketPath(uint32_t appId);
 	SavedTicket getCachedTicket(uint32_t appId);
 	bool saveTicketToCache(CMsgClientGetAppOwnershipTicketResponse* resp);
+
+	// Drop the cached tickets for apps no longer in the added set. A ticket
+	// is only valid for the app it was minted for, and nothing else in the
+	// tree removed one when its app stopped being added, so a stale file
+	// could outlive the app and be handed to Steam by a later caller.
+	void purgeOrphans(const std::unordered_set<uint32_t>& addedAppIds);
 
 	void closePipe(HSteamPipe pipe);
 	void connectPipe(HSteamPipe pipe);

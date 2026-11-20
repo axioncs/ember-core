@@ -339,3 +339,41 @@ void Ticket::recvMsg(CProtoBufMsgBase* msg)
 			break;
 	}
 }
+
+void Ticket::purgeOrphans(const std::unordered_set<uint32_t>& addedAppIds)
+{
+	// Collect first: the removal path below mutates the maps, and a range-for
+	// over a map that is being erased from is undefined.
+	std::vector<uint32_t> orphans;
+
+	{
+		std::lock_guard<std::mutex> lock(cacheMutex);
+		for (const auto& [appId, ticket] : ticketMap)
+		{
+			if (isOrphaned(appId, addedAppIds)) orphans.push_back(appId);
+		}
+		for (const auto& [appId, ticket] : encryptedTicketMap)
+		{
+			if (isOrphaned(appId, addedAppIds)
+			    && std::find(orphans.begin(), orphans.end(), appId) == orphans.end())
+			{
+				orphans.push_back(appId);
+			}
+		}
+	}
+
+	for (const uint32_t appId : orphans)
+	{
+		std::error_code ec;
+		std::filesystem::remove(getTicketPath(appId), ec);
+		std::filesystem::remove(getEncryptedTicketPath(appId), ec);
+
+		std::lock_guard<std::mutex> lock(cacheMutex);
+		ticketMap.erase(appId);
+		encryptedTicketMap.erase(appId);
+		oneTimeSteamIdSpoof.erase(appId);
+		invalidatedApps.insert(appId);
+
+		g_pLog->info("Ticket: dropped cached ticket for %u, not an added app\n", appId);
+	}
+}

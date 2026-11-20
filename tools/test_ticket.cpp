@@ -91,6 +91,35 @@ int main()
 	CHECK((removed == std::vector<uint32_t>{101, 303}),
 	      "config watcher computes only removed app ids");
 
+	// A cached ticket is only valid for the app it was minted for. Nothing
+	// used to drop one when its app stopped being added, so a stale file could
+	// outlive the app and be handed to Steam by a later caller.
+	{
+		const std::unordered_set<uint32_t> added = {500u, 502u};
+		CHECK(Ticket::isOrphaned(500, added) == false,
+		      "purge: an added app is never an orphan");
+		CHECK(Ticket::isOrphaned(501, added) == true,
+		      "purge: an owned app with no cache entry to keep is an orphan");
+		CHECK(Ticket::isOrphaned(0, added) == false,
+		      "purge: app id 0 is never an orphan");
+		CHECK(Ticket::isOrphaned(999, added) == true,
+		      "purge: an unknown app id is an orphan");
+	}
+
+	// The launch hook must not touch an owned app at all. This is the whole
+	// design premise: Steam keeps its own ticket for apps the account owns.
+	{
+		std::ifstream hookSource("src/hooks.cpp");
+		const std::string hookText((std::istreambuf_iterator<char>(hookSource)),
+		                           std::istreambuf_iterator<char>());
+		const auto launchHook = hookText.find("hkClientAppManager_LaunchApp");
+		CHECK(launchHook != std::string::npos, "launch hook: present in hooks.cpp");
+		const auto guard = hookText.find("g_config.isAddedAppId(*pAppId)", launchHook);
+		const auto call = hookText.find("Ticket::launchApp(*pAppId)", launchHook);
+		CHECK(guard != std::string::npos && call != std::string::npos && guard < call,
+		      "launch hook: Ticket::launchApp is gated on isAddedAppId");
+	}
+
 	std::ifstream configSource("src/config.cpp");
 	const std::string configText((std::istreambuf_iterator<char>(configSource)),
 	                            std::istreambuf_iterator<char>());

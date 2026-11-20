@@ -286,6 +286,12 @@ namespace CefPort
 
 	inline constexpr const char* kRemoteDebuggingMarker = "/.cef-enable-remote-debugging";
 
+	// The marker has to land in the root the client actually uses. Probing for
+	// steam.sh rather than assuming ~/.local/share/Steam: a distro install
+	// (Arch, Debian's deb-installer) can put the root at ~/.steam/steam or
+	// ~/.steam/debian-installation, and a marker written into a directory the
+	// client never reads is indistinguishable from no marker at all — Steam
+	// opens no port, and the badge has nothing to attach to.
 	inline std::string remoteDebuggingMarkerPath()
 	{
 		const char* home = std::getenv("HOME");
@@ -293,7 +299,23 @@ namespace CefPort
 		{
 			return "";
 		}
-		return std::string(home) + "/.local/share/Steam" + kRemoteDebuggingMarker;
+		const std::string h(home);
+		const std::string candidates[] = {
+			h + "/.steam/steam",
+			h + "/.steam/debian-installation",
+			h + "/.local/share/Steam",
+		};
+		for (const auto& candidate : candidates)
+		{
+			std::error_code ec;
+			if (std::filesystem::exists(candidate + "/steam.sh", ec) && !ec)
+			{
+				return candidate + kRemoteDebuggingMarker;
+			}
+		}
+		// Nothing bootstrapped yet: fall back to the canonical location that
+		// Steam creates itself, so a pre-bootstrap run writes somewhere sane.
+		return h + "/.local/share/Steam" + kRemoteDebuggingMarker;
 	}
 
 	inline bool enableRemoteDebuggingMarker()

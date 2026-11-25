@@ -151,18 +151,17 @@ if scripts/package.sh --version "$TEST_VERSION" >/dev/null 2>&1; then
         echo "$listing" | grep -q "steamless-bin/Plugins/Steamless.API.dll" \
             && ok "zip bundles steamless-bin/Plugins/Steamless.API.dll" \
             || bad "zip is missing steamless-bin/Plugins/Steamless.API.dll"
-        echo "$listing" | grep -q "tools/desktop-coverage.lib.sh" \
-            && ok "zip bundles desktop coverage library" \
-            || bad "zip is missing desktop coverage library"
-        echo "$listing" | grep -q "tools/desktop-guardian-units.lib.sh" \
-            && ok "zip bundles desktop guardian unit library" \
-            || bad "zip is missing desktop guardian unit library"
-        echo "$listing" | grep -q "tools/launcher-shim.lib.sh" \
-            && ok "zip bundles launcher shim library" \
-            || bad "zip is missing launcher shim library"
-        echo "$listing" | grep -q "ensure-desktop-coverage.sh" \
-            && ok "zip bundles desktop coverage CLI" \
-            || bad "zip is missing desktop coverage CLI"
+        echo "$listing" | grep -q "tools/ember-units.lib.sh" \
+            && ok "zip bundles the user-unit library" \
+            || bad "zip is missing tools/ember-units.lib.sh"
+        echo "$listing" | grep -q "tools/ember-autoupdate.sh" \
+            && ok "zip bundles the payload updater" \
+            || bad "zip is missing tools/ember-autoupdate.sh"
+        if echo "$listing" | grep -q "desktop-coverage\|launcher-shim\|desktop-guardian"; then
+            bad "zip still ships the removed desktop-patching layer"
+        else
+            ok "zip ships no desktop-patching layer"
+        fi
         echo "$listing" | grep -q "bin/pattern-refresh" \
             && ok "zip bundles signed pattern refresh helper" \
             || bad "zip is missing signed pattern refresh helper"

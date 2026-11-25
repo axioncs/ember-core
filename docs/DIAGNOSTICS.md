@@ -6,7 +6,7 @@ what ember does, only *where* work runs and whether a trace is written.
 ## `EMBER_AFFTRACE` — thread-affinity trace (off by default)
 
 ```bash
-EMBER_AFFTRACE=1 <steam wrapper>
+EMBER_AFFTRACE=1 steam-ember
 ```
 
 Accepted true values: `1`, `y`, `yes`, `on`, `true` (case-insensitive).
@@ -144,7 +144,7 @@ failure than "the call ran on the watcher thread, exactly as it always used to".
 ### `EMBER_OWNER_QUEUE` — disable the handoff entirely
 
 ```bash
-EMBER_OWNER_QUEUE=off <steam wrapper>
+EMBER_OWNER_QUEUE=off steam-ember
 ```
 
 Accepted false values: `0`, `off`, `no`, `n`, `false`, `disable`, `disabled`
@@ -156,7 +156,7 @@ With the queue off, every watcher-originated Steam call runs on the calling
 thread, which is exactly the pre-hardening behaviour.
 
 `EMBER_OWNER_QUEUE_DEADLINE_MS` is **obsolete**: the handoff no longer
-blocks, so there is no deadline to set. If it is still present in a wrapper
+blocks, so there is no deadline to set. If it is still present in the launcher
 script it is ignored and a warning is logged.
 
 ### What the log says

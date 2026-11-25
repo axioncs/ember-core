@@ -19,6 +19,8 @@
 #       config.yaml                (default config copied to ~/.config/ember)
 #     setup.sh                     (installer the user runs)
 #     tools/
+#       ember-units.lib.sh         (badge watcher / cloud-push unit renderers)
+#       ember-autoupdate.sh        (payload updater the wrapper launches)
 #       steamstub-bypass/          (helper called by setup.sh install_steamstub)
 #         install-steamless.sh
 #         run-steamless.sh
@@ -128,14 +130,12 @@ printf '%s\n' "$VERSION" > "$PKG_DIR/res/release-version.txt"
 cp -r docs/LICENSE       "$PKG_DIR/docs/"
 cp -r tools/steamstub-bypass "$PKG_DIR/tools/"
 
-# Desktop-coverage helpers: reconciliation engine, user-unit/drop-in manager and
-# thin CLI. setup.sh installs all three under $EMBERDIR.
-cp tools/desktop-coverage.lib.sh       "$PKG_DIR/tools/desktop-coverage.lib.sh"
-cp tools/launcher-shim.lib.sh          "$PKG_DIR/tools/launcher-shim.lib.sh"
-cp tools/desktop-guardian-units.lib.sh "$PKG_DIR/tools/desktop-guardian-units.lib.sh"
+# User-unit renderers (badge watcher, cloud push), the payload updater the
+# wrapper launches, and the wrapper's shared helpers. setup.sh installs these
+# under $EMBERDIR.
+cp tools/ember-units.lib.sh             "$PKG_DIR/tools/ember-units.lib.sh"
 # Payload updater; setup.sh installs it next to the libs and the wrapper runs it.
 cp tools/ember-autoupdate.sh            "$PKG_DIR/tools/ember-autoupdate.sh"
-cp ensure-desktop-coverage.sh          "$PKG_DIR/ensure-desktop-coverage.sh"
 
 # Strip any build/IDE artefacts that may live alongside steamstub-bypass.
 find "$PKG_DIR/tools/steamstub-bypass" -mindepth 1 \

@@ -1,4 +1,14 @@
 #!/bin/bash
+# ember installer / uninstaller for the tarball release.
+#
+# Launch model: the distributor's `steam` binary and its "Steam" desktop entry
+# are never touched. ember builds a launcher at $EMBERDIR/path/steam (the only
+# thing that sets LD_AUDIT) and exposes it as `steam-ember` on PATH, plus a
+# separate "Wired Steam" desktop entry. Start Wired Steam for ember; start
+# Steam for the vanilla client.
+#
+# Upgrade and uninstall undo the desktop-entry and /usr/bin/steam patches that
+# older releases applied, restoring them from their tagged backups.
 
 EMBERDIR="$HOME/.local/share/ember"
 EMBERLIB="$EMBERDIR/ember-core.so"
@@ -6,37 +16,26 @@ OS_RELEASE_FILE="${OS_RELEASE_FILE:-/etc/os-release}"
 
 # User-local applications dir (XDG override always wins over system-wide).
 USER_APPS="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
-USER_DESKTOP="$USER_APPS/steam.desktop"
+# The "Wired Steam" entry. Its own file name, so the distributor's
+# steam.desktop keeps pointing at the vanilla client and steam:// links keep
+# resolving to it.
+WIRED_ENTRY="$USER_APPS/wired-steam.desktop"
 SYS_DESKTOP="/usr/share/applications/steam.desktop"
+LEGACY_USER_DESKTOP="$USER_APPS/steam.desktop"
+LEGACY_USER_AUTOSTART="${XDG_CONFIG_HOME:-$HOME/.config}/autostart/steam.desktop"
 
-# XDG autostart: some images (SteamOS/Bazzite) auto-launch Steam on desktop
-# login via /etc/xdg/autostart/steam.desktop (which calls the distro launcher,
-# bypassing our wrapper). A user-level entry of the same basename overrides it.
-USER_AUTOSTART="${XDG_CONFIG_HOME:-$HOME/.config}/autostart/steam.desktop"
-SYS_AUTOSTART="/etc/xdg/autostart/steam.desktop"
+# Where `steam-ember` lands. XDG_BIN_HOME wins when the user set one.
+BIN_DIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
+STEAM_EMBER="$BIN_DIR/steam-ember"
 
-# Tag we drop into patched .desktop files so we can detect/undo them later.
+# Markers older releases put in desktop entries they had patched. Only used to
+# find and restore those entries; nothing writes them any more.
 EMBER_TAG="X-Ember-Patched=true"
+EMBER_ALT_TAG="X-Ember-Alternative=true"
 
-# Desktop-coverage logic (scan + patch every *steam*.desktop, blindagens,
-# restore) lives in one sourceable lib shared with the wrapper. Source
-# the in-repo copy at install time so dc_run / dc_restore_all are available here.
-WRAPPER="$EMBERDIR/path/steam"
-DC_TAG="$EMBER_TAG"
 DC_BACKUP_ROOT="$EMBERDIR/backup"
+LEGACY_LAUNCHER_BACKUP="$EMBERDIR/system-launcher-backup"
 SETUP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -f "$SETUP_DIR/tools/desktop-coverage.lib.sh" ]; then
-	# shellcheck source=/dev/null
-	. "$SETUP_DIR/tools/desktop-coverage.lib.sh"
-fi
-if [ -f "$SETUP_DIR/tools/launcher-shim.lib.sh" ]; then
-	# shellcheck source=/dev/null
-	. "$SETUP_DIR/tools/launcher-shim.lib.sh"
-fi
-if [ -f "$SETUP_DIR/tools/desktop-guardian-units.lib.sh" ]; then
-	# shellcheck source=/dev/null
-	. "$SETUP_DIR/tools/desktop-guardian-units.lib.sh"
-fi
 if [ -f "$SETUP_DIR/tools/ember-units.lib.sh" ]; then
 	# shellcheck source=/dev/null
 	. "$SETUP_DIR/tools/ember-units.lib.sh"
@@ -118,6 +117,10 @@ print_install_complete() {
 	echo "│        ✓ ember Installation Completed!           │"
 	echo "└─────────────────────────────────────────────────────────┘"
 	echo -e "${NC}"
+	echo ""
+	echo -e "   Start ${BOLD}Wired Steam${NC} (or run ${GREEN}steam-ember${NC}) to play with ember."
+	echo -e "   Plain ${BOLD}Steam${NC} and ${BOLD}steam${NC} stay vanilla."
+	echo ""
 }
 
 print_uninstall_complete() {
@@ -137,9 +140,8 @@ print_uninstall_complete() {
 # ============================================================================
 
 # True on immutable / atomic systems (Bazzite, SteamOS, Fedora Atomic/ublue, …)
-# where /usr is read-only: we must NOT attempt the system-wide .desktop patch
-# (it would prompt for sudo then fail silently). User-level entries override the
-# system ones via XDG precedence, so --user fully covers the normal launchers.
+# where /usr is read-only: an uninstall cannot rewrite a system-wide file there,
+# so say so instead of asking for sudo that cannot help.
 is_immutable_distro() {
 	case "${EMBER_IMMUTABLE:-}" in
 		1|yes|true) return 0 ;;
@@ -194,46 +196,25 @@ detect_steam_binary() {
 	command -v steam 2>/dev/null
 }
 
-# Tell the Mint/Debian "steam-installer" stub apart from a real Steam launcher.
-# The stub has Name=Install Steam.
-is_real_steam_desktop() {
-	local f="$1"
-	[ -f "$f" ] || return 1
-	# Already patched by us — treat as real (don't recurse).
-	grep -q "$EMBER_TAG" "$f" 2>/dev/null && return 0
-	# Stub installer, skip it.
-	grep -q "^Name=Install Steam" "$f" 2>/dev/null && return 1
-	# Heuristic: any Exec= line that runs steam directly.
-	grep -qE "^Exec=.*((^| |\")steam( |\$|%)|/steam( |\$|%)|/games/steam|/bin/steam)" "$f" 2>/dev/null
+# True once Steam's client data root exists (~/.steam/steam -> .../steam.sh).
+# Before that, the launcher is Debian's "Install Steam" stub.
+steam_data_bootstrapped() {
+	[ -L "$HOME/.steam/steam" ] || return 1
+	local root
+	root="$(readlink -e "$HOME/.steam/steam" 2>/dev/null || true)"
+	[ -n "$root" ] && [ -x "$root/steam.sh" ]
 }
 
-# Already patched to use our wrapper?
-is_patched_desktop() {
-	[ -f "$1" ] && grep -q "$EMBER_TAG" "$1" 2>/dev/null
+# True when a .desktop file (or launcher script) carries a marker an older ember
+# put there. Nothing writes these any more; this only drives the upgrade and
+# uninstall restore paths.
+has_ember_marker() {
+	[ -f "$1" ] || return 1
+	grep -qF "$EMBER_TAG" "$1" 2>/dev/null && return 0
+	grep -qF "$EMBER_ALT_TAG" "$1" 2>/dev/null && return 0
+	grep -qF "ember" "$1" 2>/dev/null
 }
 
-# Locate a "donor" .desktop to seed the user-local override from when the user
-# doesn't already have one. Tries, in order: existing user-local (real), the
-# system-wide entry (real), and the bundle Steam itself ships under
-# ~/.steam/.../steam-launcher/.
-find_donor_desktop() {
-	local c
-	if is_real_steam_desktop "$USER_DESKTOP"; then
-		echo "$USER_DESKTOP"; return 0
-	fi
-	if is_real_steam_desktop "$SYS_DESKTOP"; then
-		echo "$SYS_DESKTOP"; return 0
-	fi
-	for c in \
-		"$HOME/.steam/steam/steam-launcher/steam.desktop" \
-		"$HOME/.steam/debian-installation/deb-installer/steam-launcher/steam.desktop" \
-		"$HOME/.steam/debian-installation/deb-installer/steam.desktop"; do
-		if is_real_steam_desktop "$c"; then
-			echo "$c"; return 0
-		fi
-	done
-	return 1
-}
 
 # ============================================================================
 # Steam process management
@@ -310,22 +291,12 @@ install_ember()
 	log_info "Installing ember libraries"
 	mkdir -p "$EMBERDIR" || exit 1
 	cp -v ./bin/* "$EMBERDIR/" | sed "s|^|   ${MUTED}${NC}|"
-	# Desktop-coverage helper (scan + patch all *steam*.desktop). Shipped in the
-	# release; copied next to the wrapper so the wrapper can invoke it.
-	install -m 0644 ./tools/desktop-coverage.lib.sh "$EMBERDIR/desktop-coverage.lib.sh" 2>/dev/null || \
-		cp ./tools/desktop-coverage.lib.sh "$EMBERDIR/desktop-coverage.lib.sh"
-	install -m 0644 ./tools/launcher-shim.lib.sh "$EMBERDIR/launcher-shim.lib.sh" 2>/dev/null || \
-		cp ./tools/launcher-shim.lib.sh "$EMBERDIR/launcher-shim.lib.sh"
-	install -m 0644 ./tools/desktop-guardian-units.lib.sh "$EMBERDIR/desktop-guardian-units.lib.sh" 2>/dev/null || \
-		cp ./tools/desktop-guardian-units.lib.sh "$EMBERDIR/desktop-guardian-units.lib.sh"
 	# User units for the badge watcher and the cloud-push timer. Shipped beside
 	# the libs so the uninstaller and a later reinstall can find them.
 	install -m 0644 ./tools/ember-units.lib.sh "$EMBERDIR/ember-units.lib.sh" 2>/dev/null || \
 		cp ./tools/ember-units.lib.sh "$EMBERDIR/ember-units.lib.sh"
-	install -m 0755 ./ensure-desktop-coverage.sh    "$EMBERDIR/ensure-desktop-coverage.sh" 2>/dev/null || \
-		{ cp ./ensure-desktop-coverage.sh "$EMBERDIR/ensure-desktop-coverage.sh"; chmod +x "$EMBERDIR/ensure-desktop-coverage.sh"; }
 	# Payload auto-updater. Runs detached from the wrapper; it only swaps the
-	# three libs above when a newer release exists, so keep it next to them.
+	# libs above when a newer release exists, so keep it next to them.
 	install -m 0755 ./tools/ember-autoupdate.sh "$EMBERDIR/ember-autoupdate.sh" 2>/dev/null || \
 		{ cp ./tools/ember-autoupdate.sh "$EMBERDIR/ember-autoupdate.sh"; chmod +x "$EMBERDIR/ember-autoupdate.sh"; }
 	# Which release this payload came from. The updater only touches an install
@@ -387,14 +358,6 @@ fi
 SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
 STEAM_BIN=""
 EMBER_EXPLICIT_STEAM_BIN=0
-# A retained mirrored backup can itself be a managed shim after an interrupted
-# restore. Never let an explicit hook promote that shim back into the launch
-# chain; resolve a vanilla Steam path instead.
-if [ -n "${EMBER_STEAM_BIN:-}" ] && \
-   head -3 "$EMBER_STEAM_BIN" 2>/dev/null | \
-   grep -qF "ember system launcher shim"; then
-	unset EMBER_STEAM_BIN
-fi
 # Override hook: an explicit, executable path wins. Lets power users pin a
 # specific Steam binary and lets the wrapper guard's unit test inject a fake
 # Steam; a no-op when unset.
@@ -406,8 +369,7 @@ fi
 if [ -z "$STEAM_BIN" ]; then
 	for c in /usr/games/steam /usr/bin/steam /usr/local/bin/steam; do
 		if [ -x "$c" ] \
-			&& [ "$(readlink -f "$c" 2>/dev/null || echo "$c")" != "$SELF" ] \
-			&& ! head -3 "$c" 2>/dev/null | grep -q "ember system launcher shim"; then
+			&& [ "$(readlink -f "$c" 2>/dev/null || echo "$c")" != "$SELF" ]; then
 			STEAM_BIN="$c"
 			break
 		fi
@@ -419,17 +381,16 @@ if [ -z "$STEAM_BIN" ]; then
 	for d in $PATH; do
 		c="$d/steam"
 		if [ -x "$c" ] \
-			&& [ "$(readlink -f "$c" 2>/dev/null || echo "$c")" != "$SELF" ] \
-			&& ! head -3 "$c" 2>/dev/null | grep -q "ember system launcher shim"; then
+			&& [ "$(readlink -f "$c" 2>/dev/null || echo "$c")" != "$SELF" ]; then
 			STEAM_BIN="$c"
 			break
 		fi
 	done
 	unset IFS
 fi
-# All system launchers are our shims or absent.  Fall back to the
-# steam.sh script inside the Steam data directory (it is what the
-# system launcher would exec anyway once the bootstrap is set up).
+# No system launcher found.  Fall back to the steam.sh script inside the
+# Steam data directory (it is what the system launcher would exec anyway
+# once the bootstrap is set up).
 if [ -z "$STEAM_BIN" ]; then
 	for c in "${HOME}/.local/share/Steam/steam.sh" \
 	         "${HOME}/.steam/steam/steam.sh" \
@@ -445,8 +406,8 @@ if [ -z "$STEAM_BIN" ]; then
 	exit 127
 fi
 # Canonicalize relative paths before we touch cwd below. Absolute paths must
-# remain verbatim because the bootstrap guard below matches their managed
-# launcher prefixes literally.
+# remain verbatim because the bootstrap guard below matches those prefixes
+# literally.
 case "$STEAM_BIN" in
 	/*) ;;
 	*) STEAM_BIN="$(readlink -f "$STEAM_BIN" 2>/dev/null || echo "$STEAM_BIN")" ;;
@@ -457,14 +418,11 @@ esac
 #
 #     STEAMPACKAGE="${0##*/}" ... *) log "Unknown Steam package"; exit 1
 #
-# A captured original such as system-launcher-backup/usr/bin/steam.orig is
-# exactly that case, so exec'ing it aborts the launch before Steam opens its
-# logger: Steam silently never starts and no log is written anywhere. Never
-# exec a launcher under a name it can reject - route through a `steam`-named
-# alias for the same file. This also heals a shim written by an older release
-# that still hands over the `.orig` path directly.
-# EMBER_POLICY_BIN keeps the resolved path so the bootstrap guard below still
-# classifies the launcher by what was actually resolved, not by the alias.
+# Exec'ing it under any other name aborts the launch before Steam opens its
+# logger: Steam silently never starts and no log is written anywhere. Never exec
+# a launcher under a name it can reject - route through a `steam`-named alias for
+# the same file. EMBER_POLICY_BIN keeps the resolved path so the bootstrap guard
+# below still classifies the launcher by what was actually resolved.
 EMBER_POLICY_BIN="$STEAM_BIN"
 ember_launcher_name_safe() {
 	case "${1##*/}" in
@@ -479,13 +437,9 @@ ember_same_file() {
 }
 ember_normalize_launcher() {
 	ember_launcher_name_safe "$STEAM_BIN" && return 0
-	# 1) The alias the installer keeps next to the captured original.
-	_ember_sibling="${STEAM_BIN%/*}/steam"
-	if [ -x "$_ember_sibling" ] && ember_same_file "$_ember_sibling" "$STEAM_BIN"; then
-		STEAM_BIN="$_ember_sibling"
-		return 0
-	fi
-	# 2) A private alias we own, created on demand.
+	# A private alias we own, created on demand. Valve's distro launcher derives
+	# its identity from argv[0] and aborts on anything but steam/bin_steam.sh, so
+	# never exec a launcher under a name it rejects.
 	_ember_alias_dir="$EMBERDIR/launcher-alias"
 	_ember_alias="$_ember_alias_dir/steam"
 	if mkdir -p "$_ember_alias_dir" 2>/dev/null; then
@@ -498,7 +452,7 @@ ember_normalize_launcher() {
 			return 0
 		fi
 	fi
-	# 3) Nothing aliasable: the data-dir steam.sh ignores its own name.
+	# Nothing aliasable: the data-dir steam.sh ignores its own name.
 	for _ember_c in "${HOME}/.local/share/Steam/steam.sh" \
 	               "${HOME}/.steam/steam/steam.sh" \
 	               "${HOME}/.steam/debian-installation/steam.sh"; do
@@ -527,20 +481,15 @@ ember_exec_vanilla() {
 
 # Debian's Install Steam package stub is a valid executable before the client
 # root exists, but it is not a Steam client and must never receive injection.
-# Explicit test/pinned binaries remain eligible; captured originals from our
-# system-launcher backup are shim-originated and still require bootstrap.
+# An explicitly pinned binary is the caller's own choice and stays eligible.
 ember_bootstrap_guard() {
 	if [ "${EMBER_EXPLICIT_STEAM_BIN:-0}" = 1 ]; then
-		case "$EMBER_POLICY_BIN" in
-			"$EMBERDIR/system-launcher-backup/"*) ;;
-			*) return 0 ;;
-		esac
-	else
-		case "$EMBER_POLICY_BIN" in
-			/usr/games/steam|/usr/bin/steam|/usr/local/bin/steam) ;;
-			*) return 0 ;;
-		esac
+		return 0
 	fi
+	case "$EMBER_POLICY_BIN" in
+		/usr/games/steam|/usr/bin/steam|/usr/local/bin/steam) ;;
+		*) return 0 ;;
+	esac
 	[ -L "$HOME/.steam/steam" ] || return 1
 	_ember_bootstrap_root="$(readlink -e "$HOME/.steam/steam" 2>/dev/null || true)"
 	[ -n "$_ember_bootstrap_root" ] || return 1
@@ -880,22 +829,6 @@ fi
 
 AUDIT="$EMBERDIR/ember-library-inject.so:$EMBERDIR/ember-core.so"
 
-# Re-assert desktop-entry coverage without putting reconciliation on the launch
-# critical path. Prefer the serialized guardian; retain the legacy CLI fallback
-# during upgrades or on desktops without a working user manager.
-if command -v systemctl >/dev/null 2>&1 && \
-   systemctl --user --quiet is-enabled ember-desktop-guardian.path >/dev/null 2>&1; then
-	systemctl --user start ember-desktop-guardian.service >/dev/null 2>&1 &
-elif [ -x "$EMBERDIR/ensure-desktop-coverage.sh" ]; then
-	# Lowest priority we can give it: this fallback runs concurrently with Steam's
-	# own start, and a pass that does have work to do is seconds of shell CPU.
-	if command -v nice >/dev/null 2>&1; then
-		WRAPPER="$EMBERDIR/path/steam" nice -n 10 "$EMBERDIR/ensure-desktop-coverage.sh" --user >/dev/null 2>&1 &
-	else
-		WRAPPER="$EMBERDIR/path/steam" "$EMBERDIR/ensure-desktop-coverage.sh" --user >/dev/null 2>&1 &
-	fi
-fi
-
 if [ -n "$EMBER_INHERITED_AUDIT" ]; then
 	export LD_AUDIT="$AUDIT:$EMBER_INHERITED_AUDIT"
 else
@@ -904,8 +837,8 @@ fi
 exec "$STEAM_BIN" "$@"
 EOF
 
-	# The root-owned launcher shim refuses group/other-writable wrappers. Set the
-	# complete mode explicitly so a user umask such as 0002 cannot produce 0775.
+	# Explicit mode: a user umask such as 0002 must not produce a group-writable
+	# launcher. steam-ember is the only entry point, but keep it tight anyway.
 	chmod 0755 "$EMBERDIR/path/steam"
 
 	log_success "Steam wrapper created at $EMBERDIR/path/steam"
@@ -913,313 +846,133 @@ EOF
 	return 0
 }
 
-# NOTE: the user-level autostart override (mirror the system/Steam autostart entry
-# so the desktop session's auto-launch of Steam runs through our wrapper) now lives
-# in the shared coverage lib as dc_seed_autostart_override, invoked from dc_run —
-# so it runs at install AND on every per-launch re-assert, and covers ANY
-# distro that auto-starts Steam via /etc/xdg/autostart (SteamOS/Bazzite and beyond),
-# not just at install time. The old setup_autostart_override/is_autostart_steam_desktop/
-# rewrite_primary_exec_to_wrapper helpers were removed as dead code.
-
 # ---------------------------------------------------------------------------
-# System launcher interception
+# Launch integration: `steam-ember` on PATH and the "Wired Steam" entry
 # ---------------------------------------------------------------------------
-# Every launch path (.desktop entries, terminal invocations, XDG autostart,
-# third-party programs calling the steam binary) converges on the system
-# launcher script.  On Arch/Fedora this is /usr/bin/steam; on Debian/Ubuntu/
-# Mint it is /usr/games/steam.  These scripts are package-manager-owned and
-# have NO integrity check (unlike steam.sh which is SHA-verified), so wrapping
-# them is safe and survives Steam self-updates.
-#
-# System launcher interception and restoration live in the shared sourceable
-# library loaded near the top of this script. Keeping one implementation here
-# avoids divergent backup, verification, and pre-bootstrap stub behavior.
+# Nothing here touches the distributor's `steam` binary, its "Steam" desktop
+# entry or its autostart file. $EMBERDIR/path/steam stays the only piece that
+# sets LD_AUDIT; `steam-ember` is a thin exec of it, and the desktop entry names
+# that command rather than an absolute path so a changed XDG_BIN_HOME still
+# works.
 
-# Current launcher integration uses the shared sourceable library.
-setup_system_launcher() {
-	if is_immutable_distro; then
-		log_info "Immutable distro: skipping system launcher interception"
-		return 1
-	fi
-	# Do not touch Debian's pre-bootstrap Install Steam package stub. The
-	# eligibility check runs before sudo, backups, or any launcher write.
-	if ! ls_steam_bootstrapped; then
-		log_info "Steam is not bootstrapped yet: leaving the distro installer launcher untouched"
-		return 1
-	fi
-
-	LS_EMBERDIR="$EMBERDIR"
-	LS_BACKUP_ROOT="$EMBERDIR/system-launcher-backup"
-	local launcher launcher_detected=0 launcher_needs_sudo=0
-	while IFS= read -r launcher; do
-		[ -n "$launcher" ] || continue
-		launcher_detected=1
-		[ -w "$launcher" ] || launcher_needs_sudo=1
-	done < <(ls_detect_launchers)
-	if [ "$launcher_detected" = 0 ]; then
-		log_warn "No eligible distro Steam launcher was found"
-		return 1
-	fi
-	if [ "$launcher_needs_sudo" = 0 ]; then
-		LS_SUDO=""
-	elif [ -n "${SUDO_ASKPASS:-}" ] && [ -x "${SUDO_ASKPASS:-}" ]; then
-		LS_SUDO="sudo -A"
-	elif [ "${EMBER_SUDO_PRIMED:-0}" = 1 ] && command -v sudo >/dev/null 2>&1; then
-		LS_SUDO="sudo"
-	elif [ "${EMBER_SUDO_DENIED:-0}" != 1 ] && command -v sudo >/dev/null 2>&1 \
-	     && sudo -v 2>/dev/null; then
-		LS_SUDO="sudo"
-	else
-		LS_SUDO=""
-	fi
-	if ls_install_shims; then
-		log_success "Distro Steam launcher interception is active"
-		return 0
-	fi
-	log_warn "Could not install the distro launcher shim; user desktop coverage remains the fallback"
-	return 1
-}
-
-restore_system_launchers() {
-	EMBER_KEEP_LAUNCHER_BACKUP=0
-	EMBER_KEEP_LAUNCHER_TREE=0
-	if is_immutable_distro; then
-		local launcher
-		while IFS= read -r launcher; do
-			[ -n "$launcher" ] || continue
-			EMBER_KEEP_LAUNCHER_BACKUP=1
-			EMBER_KEEP_LAUNCHER_TREE=1
-			log_warn "Immutable distro has a surviving system launcher shim at $launcher; retaining the complete helper tree"
-			return 1
-		done < <(ls_wrapped_paths)
-		return 0
-	fi
-	LS_EMBERDIR="$EMBERDIR"
-	LS_BACKUP_ROOT="$EMBERDIR/system-launcher-backup"
-	if [ -n "${SUDO_ASKPASS:-}" ] && [ -x "${SUDO_ASKPASS:-}" ]; then
-		LS_SUDO="sudo -A"
-	elif command -v sudo >/dev/null 2>&1; then
-		LS_SUDO="sudo"
-	else
-		LS_SUDO=""
-	fi
-	if ls_restore_shims; then
-		return 0
-	fi
-	# A failed restore may be recoverable with the retained original. If no
-	# usable mirrored or exactly-associated legacy backup exists, the wrapper
-	# tree itself must survive uninstall so the shim remains operational.
-	local launcher backup
-	while IFS= read -r launcher; do
-		[ -n "$launcher" ] || continue
-		backup="$(ls_backup_path "$launcher")"
-		if [ -f "$backup" ] && ls_backup_is_usable "$backup" && \
-		   ls_shim_references_backup "$launcher" "$backup"; then
-			continue
-		fi
-		# A mirrored file is a safe retry fallback only when this live shim
-		# explicitly names it. Otherwise try the exactly-associated legacy file;
-		# if neither is safe, keep the complete helper tree alive.
-		backup="$(ls_legacy_backup_path "$launcher")"
-		if ! ls_legacy_backup_is_unambiguous_restore "$backup" || \
-		   ! ls_shim_references_backup "$launcher" "$backup"; then
-			EMBER_KEEP_LAUNCHER_TREE=1
-		fi
-	done < <(ls_wrapped_paths)
-	EMBER_KEEP_LAUNCHER_BACKUP=1
-	log_warn "Some system launcher shims could not be restored; retaining their backups for a later retry"
-	return 1
-}
-
-setup_path_and_desktop()
-{
-	log_info "Setting up PATH and desktop integration"
-	local system_desktop_changed=0 user_desktop_changed=0
-
-	# --- Shell PATH integration -------------------------------------------
-	local rc found=0
+# Older releases prepended $EMBERDIR/path to PATH from the shell rc files, which
+# made a plain `steam` resolve to the wrapper. That is exactly the routing this
+# model forbids, so strip those lines back out.
+remove_legacy_path_entries() {
+	local rc removed=0
 	for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
 		[ -f "$rc" ] || continue
-		if grep -q "ember/path" "$rc" 2>/dev/null; then
-			log_success "Already in $(basename "$rc")"
-		else
-			{
-				echo ''
-				echo '# ember: Add wrapper to PATH'
-				echo 'export PATH="$HOME/.local/share/ember/path:$PATH"'
-			} >> "$rc"
-			log_success "Added wrapper to $(basename "$rc")"
-		fi
-		found=1
+		grep -q "ember/path" "$rc" 2>/dev/null || continue
+		sed -i '/# ember: Add wrapper to PATH/d' "$rc"
+		sed -i '\|\.local/share/ember/path|d' "$rc"
+		removed=1
+		log_info "Removed the legacy ember PATH entry from $(basename "$rc")"
 	done
-	if [ "$found" = 0 ]; then
-		# Create a .bashrc if no shell rc files exist (rare but possible).
-		echo 'export PATH="$HOME/.local/share/ember/path:$PATH"' > "$HOME/.bashrc"
-		log_success "Created ~/.bashrc with wrapper PATH"
+	[ "$removed" = 1 ] && log_success "PATH no longer routes steam through ember"
+	return 0
+}
+
+install_steam_ember() {
+	mkdir -p "$BIN_DIR" || {
+		log_error "Could not create $BIN_DIR"
+		return 1
+	}
+	local tmp="$BIN_DIR/.steam-ember.tmp.$$"
+	cat > "$tmp" <<EOF
+#!/bin/sh
+# generated by ember's setup.sh; removed by --uninstall
+exec "$EMBERDIR/path/steam" "\$@"
+EOF
+	if ! chmod 0755 "$tmp" || ! mv -f "$tmp" "$STEAM_EMBER"; then
+		rm -f -- "$tmp"
+		log_error "Could not write $STEAM_EMBER"
+		return 1
+	fi
+	log_success "Installed $STEAM_EMBER"
+	case ":$PATH:" in
+		*":$BIN_DIR:"*) ;;
+		*) log_warn "$BIN_DIR is not on PATH here; add it to run steam-ember by name" ;;
+	esac
+	return 0
+}
+
+# A second desktop entry with its own file name, so the distributor's "Steam"
+# entry keeps pointing at the vanilla client and `steam://` links keep working.
+install_wired_entry() {
+	mkdir -p "$USER_APPS" || {
+		log_error "Could not create $USER_APPS"
+		return 1
+	}
+	cat > "$WIRED_ENTRY" <<EOF
+[Desktop Entry]
+$EMBER_ALT_TAG
+Type=Application
+Name=Wired Steam
+GenericName=Game Store
+Comment=Steam with ember loaded, for games ember added
+Exec=steam-ember %U
+Icon=steam
+Terminal=false
+Categories=Game;
+StartupWMClass=Steam
+EOF
+	chmod 0644 "$WIRED_ENTRY"
+	log_success "Wrote $WIRED_ENTRY"
+	command -v update-desktop-database >/dev/null 2>&1 &&
+		update-desktop-database "$USER_APPS" >/dev/null 2>&1 || true
+	return 0
+}
+
+# Badge watcher and cloud-push units. The watcher is enabled by default because
+# the store-page badge is invisible without it; the cloud timer is installed but
+# left off, since a timer running `rclone sync` against a remote the user has not
+# configured produces a journal entry every interval.
+install_user_units() {
+	if ! command -v ecu_install_units >/dev/null 2>&1; then
+		return 0
+	fi
+	local status
+	ecu_install_units; status=$?
+	if [ "$status" = 0 ] || [ "$status" = 1 ]; then
+		ecu_enable_ui_watch
+		ecu_install_cloud_units
+		log_info "Badge watcher enabled; cloud push installed but off"
+		log_info "  enable cloud sync with: systemctl --user enable --now ember-cloud-push.timer"
+	else
+		log_warn "Could not install the ember user units; the store-page badge needs 'ember ui watch'"
+	fi
+	return 0
+}
+
+setup_launch_integration()
+{
+	log_info "Configuring the ember launch path"
+
+	# A previous ember may have patched the distributor's own files. Undo that
+	# first: this release never owns them, and a stale /usr/bin/steam shim would
+	# keep making plain `steam` depend on this tree.
+	remove_legacy_path_entries || true
+	remove_legacy_guardian_units || true
+	if ! restore_legacy_patches; then
+		log_warn "A distro launcher still points at ember; see the fix above"
 	fi
 
-	# --- Detect Steam binary ----------------------------------------------
-	local steam_bin steam_bootstrapped=0
+	local steam_bin
 	steam_bin="$(detect_steam_binary)"
 	if [ -z "$steam_bin" ]; then
 		log_warn "Steam doesn't appear to be installed yet"
 		log_warn "Install Steam first, then re-run: ./setup.sh install"
 		return 0
 	fi
-	if ls_steam_bootstrapped; then
-		steam_bootstrapped=1
-		log_success "Steam data root is bootstrapped"
-	else
-		log_info "Steam installer stub detected before bootstrap; injection coverage is deferred"
-	fi
 	log_success "Found Steam binary at $steam_bin"
-
-	# --- Mandatory user coverage, then optional system fallback -------------
-	mkdir -p "$USER_APPS"
-	export DC_STEAM_INSTALLED="$steam_bootstrapped"
-	mkdir -p "$DC_BACKUP_ROOT" 2>/dev/null || {
-		log_error "Could not create desktop backup directory: $DC_BACKUP_ROOT"
-		return 1
-	}
-
-	# Same-ID user shadows are the authoritative layer and are reconciled before
-	# any privilege prompt. A per-entry reconciliation failure is retryable (the
-	# guardian timer/path retries it), so it must NOT abort installation of the
-	# guardian itself — that would leave the machine with no ongoing self-healing,
-	# which is exactly the "injection lost after reboot" failure.
-	# DC_FORCE: installing is never a boot path, and the shipped coverage logic may
-	# behave differently from the one that recorded the last digest, so the
-	# unchanged-input fast path must not apply here.
-	if DC_FORCE=1 dc_guardian_run; then
-		log_success "Reconciled user desktop entries"
-	else
-		log_warn "Some user desktop entries could not be fully reconciled yet; the guardian will retry them"
+	if ! steam_data_bootstrapped; then
+		log_info "Steam is not bootstrapped yet; Wired Steam will inject once it is"
 	fi
 
-	# User-manager integration is an acceleration/repair layer. Desktop shadows
-	# remain functional if systemd --user is unavailable.
-	local guardian_status
-	dgu_install_units; guardian_status=$?
-	[ "$guardian_status" = 1 ] && dgu_enable_units
-	[ "$guardian_status" = 2 ] && log_warn "Could not install all desktop guardian units; user desktop coverage remains active"
+	install_steam_ember || return 1
+	install_wired_entry || return 1
 
-	# Badge watcher and cloud-push units. The watcher is enabled by default
-	# because the store-page badge is invisible without it; the cloud timer is
-	# installed but left off, since a timer running `rclone sync` against a
-	# remote the user has not configured produces a journal entry every
-	# interval. `ember cloud setup` + enable is one command when they want it.
-	if command -v ecu_install_units >/dev/null 2>&1; then
-		ecu_install_units; guardian_status=$?
-		if [ "$guardian_status" = 0 ] || [ "$guardian_status" = 1 ]; then
-			ecu_enable_ui_watch
-			ecu_install_cloud_units
-			log_info "Badge watcher enabled; cloud push installed but off"
-			log_info "  enable cloud sync with: systemctl --user enable --now ember-cloud-push.timer"
-		else
-			log_warn "Could not install the ember user units; the store-page badge needs 'ember ui watch'"
-		fi
-	fi
-	dgu_install_autostart_dropins; guardian_status=$?
-	[ "$guardian_status" = 2 ] && log_warn "Could not install all generated-autostart drop-ins; XDG shadows remain active"
-
-	# Enabling the units is best-effort (systemctl --user may be unreachable when
-	# the installer is run via sudo/root or a non-graphical session). Verify it
-	# actually took: silently-inert units are the top cause of injection being
-	# lost on the next boot, so surface it clearly instead of reporting success.
-	if command -v systemctl >/dev/null 2>&1; then
-		if ! systemctl --user is-enabled ember-desktop-guardian.path >/dev/null 2>&1; then
-			log_warn "Desktop guardian installed but NOT active (systemd --user unreachable at install time). Cold-boot injection self-healing is OFF; re-run this installer from your normal desktop session (not via sudo/root)."
-		fi
-	fi
-
-	# Mutable systems prefer the distro launcher shim, but user-local desktop
-	# coverage above remains mandatory as a safety net on every system.
-	local coverage_policy=desktop
-	local coverage_status_file="$EMBERDIR/coverage-policy.effective"
-	if setup_system_launcher; then
-		coverage_policy=launcher
-	fi
-	if ! dc_write_policy "$coverage_policy"; then
-		log_warn "Could not persist launch coverage policy; keeping the desktop fallback"
-		if ! dc_forget_policy; then
-			log_warn "Could not clear the previous launch coverage policy"
-		fi
-		mkdir -p "$(dirname "$coverage_status_file")" 2>/dev/null || true
-		printf 'desktop\n' > "$coverage_status_file" 2>/dev/null || true
-		coverage_policy=desktop
-	else
-		rm -f -- "$coverage_status_file" 2>/dev/null || true
-	fi
-
-	if [ "$coverage_policy" = launcher ]; then
-		log_info "Distro launcher shim is primary; new system desktop entries are left untouched"
-	elif is_immutable_distro; then
-		log_info "Immutable distro (read-only /usr): using user-level coverage only; no administrator access requested."
-	elif [ "${EMBER_SUDO_DENIED:-0}" = 1 ]; then
-		log_warn "Administrator access was already declined; keeping user-local coverage without retrying sudo."
-	elif command -v sudo >/dev/null 2>&1; then
-		# Mutable systems retain the historical system layer only when the
-		# launcher shim could not be installed. Denying sudo never discards the
-		# already-working user coverage.
-		if ! sudo -v; then
-			log_warn "Administrator access not granted: the system-wide Steam entry stays unpatched. Menu and taskbar launches still use the injected per-user entry (it wins by desktop-file-id); only a launcher pinned by absolute path to the system file would skip the wrapper. Re-run with admin access to also cover the system entry."
-		else
-			DC_SUDO="sudo"
-			export DC_SUDO
-			dc_migrate_legacy_backups --system
-			if EMBER_COVERAGE_POLICY=desktop DC_FORCE=1 dc_run --system; then
-				system_desktop_changed=1
-				log_success "Patched optional system Steam desktop entries"
-			else
-				log_warn "Optional system desktop fallback could not be fully applied"
-			fi
-		fi
-	else
-		log_warn "sudo not available: the system-wide Steam entry stays unpatched. Menu and taskbar launches still use the injected per-user entry (it wins by desktop-file-id); only a launcher pinned by absolute path to the system file would skip the wrapper."
-	fi
-
-	# Fallback: if the user still has no menu entry (no donor anywhere), write
-	# a minimal launcher. Before Steam bootstrap it must call the distro installer
-	# directly; routing that stub through our wrapper would inject into the
-	# installer and could break the first Steam installation.
-	if [ ! -e "$USER_DESKTOP" ]; then
-		local minimal_exec="$EMBERDIR/path/steam"
-		local minimal_tags="$DC_SEED_TAG"
-		if [ "$steam_bootstrapped" != 1 ]; then
-			minimal_exec="$steam_bin"
-			minimal_tags="$DC_SEED_TAG
-$DC_PREBOOTSTRAP_TAG"
-			log_info "Steam is not bootstrapped; keeping the minimal launcher vanilla"
-		fi
-		log_info "Writing a minimal Steam launcher"
-		cat > "$USER_DESKTOP" << EOF
-[Desktop Entry]
-$EMBER_TAG
-$minimal_tags
-Name=Steam
-Comment=Application for managing and playing games on Steam
-Exec=$minimal_exec %U
-Icon=steam
-Terminal=false
-Type=Application
-Categories=Network;FileTransfer;Game;
-MimeType=x-scheme-handler/steam;x-scheme-handler/steamlink;
-PrefersNonDefaultGPU=true
-EOF
-		chmod 0644 "$USER_DESKTOP"
-		user_desktop_changed=1
-		log_success "Created $USER_DESKTOP"
-	fi
-
-	# Guardian reconciliation already converged user caches. Refresh here only
-	# for the direct minimal fallback or a successful mutable-system pass.
-	if command -v update-desktop-database >/dev/null 2>&1; then
-		[ "$user_desktop_changed" = 1 ] && \
-			update-desktop-database "$USER_APPS" >/dev/null 2>&1 || true
-		[ "$system_desktop_changed" = 1 ] && command -v sudo >/dev/null 2>&1 && \
-			sudo update-desktop-database "/usr/share/applications" >/dev/null 2>&1 || true
-	fi
-
+	log_info "Steam's own launcher is untouched; start Wired Steam for ember"
 	echo ""
 	return 0
 }
@@ -1285,8 +1038,11 @@ install_all()
 	print_section "Creating Steam wrapper"
 	create_steam_wrapper
 
-	print_section "Configuring PATH & desktop entry"
-	setup_path_and_desktop
+	print_section "Installing steam-ember and Wired Steam"
+	setup_launch_integration
+
+	print_section "Installing badge watcher units"
+	install_user_units
 
 	print_section "Installing Steamless helper"
 	install_steamstub "$EMBERDIR"
@@ -1298,156 +1054,213 @@ install_all()
 # Uninstall
 # ============================================================================
 
-restore_or_remove_desktop() {
-	local f="$1"
-	local backup="$DC_BACKUP_ROOT/${f#/}" legacy
-	local sudo_cmd="${2:-}"
-
-	[ -f "$f" ] || return 0
-	if [ ! -f "$backup" ]; then
-		for legacy in "$f.ember-backup" "$f.ember-bak"; do
-			[ -f "$legacy" ] || continue
-			mkdir -p "$(dirname "$backup")" 2>/dev/null || break
-			if [ -n "$sudo_cmd" ]; then
-				$sudo_cmd cat -- "$legacy" > "$backup" 2>/dev/null || { rm -f "$backup"; break; }
-			else
-				cp -- "$legacy" "$backup" 2>/dev/null || { rm -f "$backup"; break; }
-			fi
-			$sudo_cmd rm -f -- "$legacy" 2>/dev/null || true
-			break
-		done
-	fi
-	if ! is_patched_desktop "$f" && [ ! -f "$backup" ]; then
-		return 0
-	fi
-
-	if [ -f "$backup" ]; then
-		log_info "Restoring $f from backup"
-		if $ember_sudo cp -- "$backup" "$f"; then
-			rm -f -- "$backup"
-			log_success "Restored $f"
-		fi
+# Run a privileged command, honouring sudo -A when an askpass helper is set.
+ember_sudo() {
+	if [ -n "${SUDO_ASKPASS:-}" ] && [ -x "${SUDO_ASKPASS:-}" ]; then
+		sudo -A "$@"
 	else
-		log_info "Removing $f (no backup found)"
-		$sudo_cmd rm -- "$f"
-		log_success "Removed $f"
+		sudo "$@"
 	fi
+}
+
+# Put one of the distributor's own files back the way it shipped. Older ember
+# patched these in place and kept either a mirrored copy under
+# $EMBERDIR/backup/<absolute path> or a sibling .ember-backup/.pre-ember copy.
+# $2 is empty for files we may write directly, or "ember_sudo" for system paths.
+restore_legacy_file() {
+	local f="$1" privileged="${2:-}"
+	local mirrored="$DC_BACKUP_ROOT/${f#/}" backup="" candidate
+
+	[ -e "$f" ] || return 0
+	has_ember_marker "$f" || return 0
+
+	for candidate in "$mirrored" "$f.ember-backup" "$f.ember-bak" "$f.pre-ember"; do
+		if [ -f "$candidate" ]; then
+			backup="$candidate"
+			break
+		fi
+	done
+
+	if [ -z "$backup" ]; then
+		log_warn "$f still points at ember and no backup was found; removing it"
+		if $privileged rm -f -- "$f"; then
+			log_success "Removed $f"
+			return 0
+		fi
+		log_warn "  fix:  sudo rm $f"
+		return 1
+	fi
+
+	log_info "Restoring $f from $backup"
+	if ! $privileged cp -- "$backup" "$f"; then
+		log_warn "$f still points at ember"
+		log_warn "  fix:  sudo cp $backup $f"
+		return 1
+	fi
+	[ "$backup" = "$mirrored" ] || $privileged rm -f -- "$backup" 2>/dev/null || true
+	log_success "Restored $f"
+	return 0
+}
+
+# Older releases replaced the distro launcher (/usr/bin/steam or
+# /usr/games/steam) with a shim and kept the original under
+# $EMBERDIR/system-launcher-backup. ember must never own that path, so put the
+# original back; if that is impossible, say exactly what is left and how to fix
+# it. Returns 0 only when nothing points at ember any more.
+restore_legacy_launcher() {
+	local launcher found=0 failed=0 backup candidate
+	for launcher in /usr/bin/steam /usr/games/steam /usr/local/bin/steam; do
+		[ -e "$launcher" ] || [ -L "$launcher" ] || continue
+		if [ ! -L "$launcher" ] && ! head -5 "$launcher" 2>/dev/null | grep -q "ember"; then
+			continue
+		fi
+		found=1
+		backup=""
+		for candidate in \
+			"$LEGACY_LAUNCHER_BACKUP/${launcher#/}.orig" \
+			"$LEGACY_LAUNCHER_BACKUP/${launcher#/}" \
+			"$launcher.ember-backup" \
+			"$launcher.orig"; do
+			if [ -f "$candidate" ]; then
+				backup="$candidate"
+				break
+			fi
+		done
+		if [ -z "$backup" ]; then
+			failed=1
+			log_warn "$launcher still points at ember and no original was found"
+			log_warn "  fix:  sudo rm $launcher, then reinstall Steam's launcher package"
+			continue
+		fi
+		if [ -w "$launcher" ] && cp -p -- "$backup" "$launcher"; then
+			log_success "Restored $launcher"
+		elif command -v sudo >/dev/null 2>&1 && \
+		     ember_sudo cp -p -- "$backup" "$launcher"; then
+			log_success "Restored $launcher (with administrator access)"
+		else
+			failed=1
+			log_warn "$launcher still points at ember"
+			log_warn "  fix:  sudo cp $backup $launcher"
+			continue
+		fi
+	done
+	[ "$found" = 1 ] || return 0
+	if [ "$failed" = 1 ]; then
+		log_warn "ember could not restore every distro launcher; see the commands above"
+		log_warn "Keeping $LEGACY_LAUNCHER_BACKUP so a retry can finish the job"
+		return 1
+	fi
+	log_success "Distro Steam launchers no longer point at ember"
+	return 0
+}
+
+# Restore everything an older ember patched: the distributor's desktop entries,
+# its autostart file and the distro launcher. Non-zero means a launcher still
+# points at ember; its originals are then kept so a retry can finish the job.
+restore_legacy_patches() {
+	local rc=0
+	restore_legacy_file "$LEGACY_USER_DESKTOP" || rc=1
+	restore_legacy_file "$LEGACY_USER_AUTOSTART" || rc=1
+	if [ -f "$SYS_DESKTOP" ] && has_ember_marker "$SYS_DESKTOP"; then
+		if [ -w "$SYS_DESKTOP" ] || is_immutable_distro || \
+		   ! command -v sudo >/dev/null 2>&1; then
+			restore_legacy_file "$SYS_DESKTOP" || rc=1
+		else
+			restore_legacy_file "$SYS_DESKTOP" ember_sudo || rc=1
+		fi
+	fi
+	restore_legacy_launcher || rc=1
+	return "$rc"
+}
+
+# Desktop-guardian units shipped by older releases exist only to run the
+# coverage CLI this version no longer installs, so they would fail every tick.
+# The names are ember-specific and were always written by ember.
+remove_legacy_guardian_units() {
+	local unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+	local unit removed=0
+	for unit in ember-desktop-guardian.service \
+	            ember-desktop-guardian.timer \
+	            ember-desktop-guardian.path; do
+		[ -f "$unit_dir/$unit" ] || continue
+		if command -v systemctl >/dev/null 2>&1; then
+			systemctl --user disable --now "$unit" >/dev/null 2>&1 || true
+		fi
+		rm -f -- "$unit_dir/$unit" && removed=1
+	done
+	if [ "$removed" = 1 ]; then
+		if command -v systemctl >/dev/null 2>&1; then
+			systemctl --user daemon-reload >/dev/null 2>&1 || true
+			systemctl --user reset-failed >/dev/null 2>&1 || true
+		fi
+		log_success "Removed the legacy desktop-guardian units"
+	fi
+	return 0
 }
 
 uninstall()
 {
 	print_banner
 	print_section "Uninstalling ember"
-	local desktop_restore_complete=1
 	local launcher_restore_complete=1
 
 	kill_steam
 
-	# Remove from shell rc files.
-	local rc
-	for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
-		[ -f "$rc" ] || continue
-		if grep -q "ember/path" "$rc" 2>/dev/null; then
-			log_info "Cleaning wrapper PATH entry from $(basename "$rc")"
-			sed -i '/# ember: Add wrapper to PATH/d' "$rc"
-			sed -i '\|ember/path|d' "$rc"
-		fi
-	done
+	remove_legacy_path_entries || true
 
-	# Stop generated launch paths before restoring their desktop-file sources.
-	# Removal is sentinel-scoped and therefore preserves foreign unit drop-ins.
-	if command -v dgu_remove_autostart_dropins >/dev/null 2>&1; then
-		dgu_remove_autostart_dropins || true
-	fi
-	if command -v dgu_remove_units >/dev/null 2>&1; then
-		dgu_remove_units || true
-	fi
-	# Badge watcher and cloud-push timer, sentinel-scoped the same way.
+	# Badge watcher and cloud-push timer, sentinel-scoped.
 	if command -v ecu_remove_units >/dev/null 2>&1; then
 		ecu_remove_units || true
 	fi
+	remove_legacy_guardian_units || true
 
-	# Restore every patched/symlinked *steam*.desktop (menu user+system incl. the
-	# stub, ~/Desktop shortcut, autostart user+system) from their backups via the
-	# shared lib. System paths use sudo when available.
-	if command -v dc_restore_all >/dev/null 2>&1; then
-		if is_immutable_distro || ! command -v sudo >/dev/null 2>&1; then
-			DC_SUDO=""
-		else
-			DC_SUDO="sudo"
-		fi
-		export DC_SUDO
-		if dc_restore_all; then
-			log_success "Restored Steam desktop entries"
-		else
-			desktop_restore_complete=0
-			log_warn "System desktop restoration is unavailable; retaining user desktop coverage and helpers for a later retry"
-		fi
-	else
-		# Lib unavailable (older layout): fall back to the legacy per-file restore.
-		restore_or_remove_desktop "$USER_DESKTOP"
-		[ -f "$SYS_DESKTOP" ] && command -v sudo >/dev/null 2>&1 && \
-			restore_or_remove_desktop "$SYS_DESKTOP" sudo
+	# The tarball launcher and its own desktop entry.
+	if [ -e "$STEAM_EMBER" ] || [ -L "$STEAM_EMBER" ]; then
+		rm -f -- "$STEAM_EMBER" && log_success "Removed $STEAM_EMBER"
 	fi
-	if command -v update-desktop-database >/dev/null 2>&1; then
-		update-desktop-database "$USER_APPS" >/dev/null 2>&1 || true
-		! is_immutable_distro && command -v sudo >/dev/null 2>&1 && \
-			sudo update-desktop-database "/usr/share/applications" >/dev/null 2>&1 || true
+	if [ -e "$WIRED_ENTRY" ] || [ -L "$WIRED_ENTRY" ]; then
+		rm -f -- "$WIRED_ENTRY" && log_success "Removed $WIRED_ENTRY"
 	fi
 
-	# Legacy: /usr/games/steam patch from older versions.
-	if ! is_immutable_distro && [ -f "/usr/games/steam" ] && grep -q "ember" "/usr/games/steam" 2>/dev/null; then
-		log_info "Found legacy /usr/games/steam modification"
-		if [ -f "/usr/games/steam.ember-backup" ]; then
-			log_info "Restoring original /usr/games/steam (requires sudo)"
-			sudo cp "/usr/games/steam.ember-backup" "/usr/games/steam"
-			sudo rm "/usr/games/steam.ember-backup"
-			log_success "Restored /usr/games/steam"
-		else
-			log_warn "Legacy modification found but no backup exists"
-		fi
-	fi
-
-	# Restore any wrapped system launchers before removing the dir.
-	if restore_system_launchers; then
+	# Undo the patches older releases left on the distributor's own files.
+	if restore_legacy_patches; then
 		launcher_restore_complete=1
 	else
 		launcher_restore_complete=0
 	fi
 
-	# Policy state lives outside EMBERDIR. Forget it only after launcher restore;
-	# retaining it with a surviving shim keeps interrupted uninstalls recoverable.
-	if [ "$launcher_restore_complete" = 1 ]; then
-		if command -v dc_forget_policy >/dev/null 2>&1; then
-			dc_forget_policy || true
-		else
-			local state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
-			case "$state_home" in
-				/*) : ;;
-				*) state_home="$HOME/.local/state" ;;
-			esac
-			rm -f -- "$state_home/ember/coverage.policy" 2>/dev/null || true
+	# Coverage policy state from older releases lives outside EMBERDIR.
+	local state_home="${XDG_STATE_HOME:-$HOME/.local/state}"
+	case "$state_home" in
+		/*) : ;;
+		*) state_home="$HOME/.local/state" ;;
+	esac
+	rm -f -- "$state_home/ember/coverage.policy" 2>/dev/null || true
+	rm -f -- "$EMBERDIR/coverage-policy.effective" 2>/dev/null || true
+
+	if command -v update-desktop-database >/dev/null 2>&1; then
+		update-desktop-database "$USER_APPS" >/dev/null 2>&1 || true
+		if ! is_immutable_distro && command -v sudo >/dev/null 2>&1; then
+			ember_sudo update-desktop-database "/usr/share/applications" >/dev/null 2>&1 || true
 		fi
-	else
-		log_warn "Keeping coverage.policy while a system launcher shim still needs restoration"
 	fi
 
-	if [ "${EMBER_KEEP_LAUNCHER_TREE:-0}" = 1 ] && [ -d "$EMBERDIR" ]; then
-		log_warn "Keeping $EMBERDIR because a system launcher has no recoverable original"
-	elif [ "${EMBER_KEEP_LAUNCHER_BACKUP:-0}" = 1 ] && [ -d "$EMBERDIR" ]; then
-		log_warn "Keeping $EMBERDIR/system-launcher-backup because a system launcher shim could not be restored"
+	if [ -d "$EMBERDIR" ]; then
+		# Drop the payload either way: nothing points at the wrapper once
+		# steam-ember and the legacy shims are gone. Keep only the launcher
+		# originals while a restore is still pending, so a retry can finish.
 		find "$EMBERDIR" -mindepth 1 -maxdepth 1 \
 			! -name system-launcher-backup -exec rm -rf -- {} + 2>/dev/null || true
-	elif [ -d "$EMBERDIR" ] && [ "$desktop_restore_complete" = 1 ]; then
-		log_info "Removing $EMBERDIR"
-		rm -rf "$EMBERDIR"
-	elif [ -d "$EMBERDIR" ]; then
-		log_warn "Keeping $EMBERDIR because desktop restoration is incomplete"
+		if [ "$launcher_restore_complete" = 0 ]; then
+			log_info "Re-run this uninstaller once $LEGACY_LAUNCHER_BACKUP is no longer needed"
+		else
+			rm -rf -- "$EMBERDIR" 2>/dev/null || true
+			[ -d "$EMBERDIR" ] || log_success "Removed $EMBERDIR"
+		fi
 	fi
 
 	print_uninstall_complete
 }
-
 # ============================================================================
 # Entry point
 # ============================================================================
@@ -1463,12 +1276,21 @@ if [[ $# -lt 1 ]]; then
 	print_banner
 	echo -e "${BOLD}Usage:${NC}  $0 ${GREEN}install${NC} | ${GREEN}uninstall${NC}"
 	echo ""
+	echo "  install    build the ember launcher, install steam-ember and the"
+	echo "             \"Wired Steam\" desktop entry, and enable the badge watcher."
+	echo "             Steam's own launcher is left untouched."
+	echo "  uninstall  remove steam-ember, Wired Steam and the payload, restore"
+	echo "             the distributor's files older releases had patched."
+	echo ""
 	exit 0
 fi
 
-if [ "$1" == "install" ]; then
+# Accept the --install/--uninstall spelling too; both have been documented.
+cmd="${1#--}"
+
+if [ "$cmd" == "install" ]; then
 	install_all
-elif [ "$1" == "uninstall" ]; then
+elif [ "$cmd" == "uninstall" ]; then
 	uninstall
 else
 	log_error "Unknown command: $1"

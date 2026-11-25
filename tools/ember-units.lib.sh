@@ -12,13 +12,23 @@
 # name, and every manager call is best-effort: a machine without a reachable
 # systemd --user still gets a working install, it just does not get the units.
 
-: "${ECU_UNIT_DIR:=$(dc_config_home)/systemd/user}"
 : "${ECU_SYSTEMCTL:=systemctl}"
 
 ECU_UI_SERVICE=ember-ui-watch.service
 ECU_CLOUD_SERVICE=ember-cloud-push.service
 ECU_CLOUD_TIMER=ember-cloud-push.timer
 ECU_UNIT_SENTINEL='# X-Ember-Unit=true'
+
+# XDG_CONFIG_HOME, absolute or nothing. Kept local so the library has no
+# dependency on another sourced file.
+ecu_config_home() {
+	case "${XDG_CONFIG_HOME:-}" in
+		/*) printf '%s\n' "$XDG_CONFIG_HOME" ;;
+		*) printf '%s\n' "${HOME:-/tmp}/.config" ;;
+	esac
+}
+
+: "${ECU_UNIT_DIR:=$(ecu_config_home)/systemd/user}"
 
 ecu_log() {
 	printf 'ember-units: %s\n' "$*" >&2

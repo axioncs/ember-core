@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -118,6 +119,19 @@ int main(int argc, char** argv)
 		             "<steamui.so> [src/patterns.cpp]\n";
 		return 2;
 	}
+	// These locators are checked against real client bytes. A machine without
+	// Steam installed cannot run the check; that is a skip, not a defect.
+	for (int i = 1; i <= 2; ++i)
+	{
+		std::error_code ec;
+		if (!std::filesystem::is_regular_file(argv[i], ec))
+		{
+			std::cout << "SKIP: " << argv[i]
+			          << " is not installed; optional locators need a Steam client\n";
+			return 0;
+		}
+	}
+
 	const std::string client = readFile(argv[1]);
 	const std::string ui = readFile(argv[2]);
 	const std::string source = readFile(argc == 4 ? argv[3] : "src/patterns.cpp");

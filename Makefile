@@ -58,6 +58,12 @@ endif
 .PHONY: test-reconcilepin-scan
 .PHONY: test-depotkey-recv-policy
 
+test-cloudstore-put:
+	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -Werror -I src \
+		tools/test_cloudstore_put.cpp src/feats/cloudstore.cpp src/feats/sha256.cpp \
+		-o /tmp/test_cloudstore_put
+	/tmp/test_cloudstore_put
+
 test-manifestdonor:
 	$(CXX) -std=c++20 -Wall -Wextra -Wpedantic -Werror \
 		tools/test_manifestdonor.cpp -o /tmp/test_manifestdonor

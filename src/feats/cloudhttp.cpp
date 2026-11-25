@@ -472,12 +472,16 @@ namespace CloudHTTP
 			body.resize(request.contentLength);
 
 			CloudStore::Entry entry;
-			if (!CloudStore::put(root_, accountId, appId, savePath, body, entry))
+			const auto result = CloudStore::put(root_, accountId, appId, savePath, body, entry);
+			if (result == CloudStore::PutResult::Error)
 			{
 				g_pLog->warn("Cloud: PUT %u/%u rejected (%s)\n", accountId, appId, savePath.c_str());
 				sendError(fd, 400, "cannot store save");
 				return;
 			}
+
+			// `Unchanged` is still a successful PUT: Steam needs the 200 to
+			// finish the upload batch even when the bytes were already stored.
 
 			g_pLog->info("Cloud: PUT %u/%u %s (%zu bytes, sha %s)\n",
 				accountId, appId, savePath.c_str(), body.size(), entry.sha.c_str());

@@ -267,12 +267,12 @@ namespace CloudStore
 		return listLocked(root, accountId, appId);
 	}
 
-	bool put(const std::filesystem::path& root, const uint32_t accountId, const uint32_t appId,
+	PutResult put(const std::filesystem::path& root, const uint32_t accountId, const uint32_t appId,
 		const std::string& path, const std::string& data, Entry& out)
 	{
 		if (!isSafePath(path))
 		{
-			return false;
+			return PutResult::Error;
 		}
 
 		const Lock lock;
@@ -294,7 +294,7 @@ namespace CloudStore
 				std::ofstream file(tmp, std::ios::binary | std::ios::trunc);
 				if (!file.is_open())
 				{
-					return false;
+					return PutResult::Error;
 				}
 				file << data;
 				file.close();
@@ -304,7 +304,7 @@ namespace CloudStore
 			if (ec)
 			{
 				std::filesystem::remove(tmp, ec);
-				return false;
+				return PutResult::Error;
 			}
 		}
 
@@ -316,9 +316,10 @@ namespace CloudStore
 
 		if (current != existing.end() && current->sha == sha && current->size == data.size())
 		{
-			// Same bytes: nothing to record, and no new change.
+			// Same bytes: nothing to record, and no new change. This is a
+			// successful PUT to the caller, not a rejected one.
 			out = *current;
-			return false;
+			return PutResult::Unchanged;
 		}
 
 		// A changed file inherits its timestamp, so Steam sees a modification
@@ -346,10 +347,10 @@ namespace CloudStore
 
 		if (!writeText(manifestPath(root, accountId, appId), rebuilt.str()))
 		{
-			return false;
+			return PutResult::Error;
 		}
 
-		return true;
+		return PutResult::Stored;
 	}
 
 	bool get(const std::filesystem::path& root, const uint32_t accountId, const uint32_t appId,

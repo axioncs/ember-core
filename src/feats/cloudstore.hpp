@@ -47,10 +47,19 @@ namespace CloudStore
 	// not an error — a game that never synced has no store entry yet.
 	std::vector<Entry> list(const std::filesystem::path& root, const uint32_t accountId, const uint32_t appId);
 
+	// Result of storing a save. `Unchanged` is success: the bytes were already
+	// in the store, so the manifest and change number must stay untouched.
+	enum class PutResult
+	{
+		Stored,
+		Unchanged,
+		Error,
+	};
+
 	// Stores `data` under its SHA, links it into the app's blob directory, and
-	// records it in the manifest. Re-storing identical bytes leaves the manifest
-	// untouched and reports false. Returns false when the path is unsafe.
-	bool put(const std::filesystem::path& root, const uint32_t accountId, const uint32_t appId,
+	// records it in the manifest. Re-storing identical bytes is `Unchanged`.
+	// `Error` means the path was unsafe or the store could not be written.
+	PutResult put(const std::filesystem::path& root, const uint32_t accountId, const uint32_t appId,
 		const std::string& path, const std::string& data, Entry& out);
 
 	// Reads a file back. False when the path is absent from the manifest or the

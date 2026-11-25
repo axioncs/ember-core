@@ -387,7 +387,6 @@ bool CConfig::loadSettings()
 	api = getSetting<bool>(node, "API", true);
 	fakeEmail = getSetting<std::string>(node, "FakeEmail", "");
 	fakeWalletBalance = getSetting<int32_t>(node, "FakeWalletBalance", 0);
-	disableCloud = getSetting<bool>(node, "DisableCloud", true);
 	cloud = getSetting<bool>(node, "Cloud", true);
 	autoUpdateApps = getSetting<bool>(node, "AutoUpdateApps", true);
 	DonateSettings donateSettings;
@@ -430,14 +429,14 @@ bool CConfig::loadSettings()
 		"Config: DisableFamilyShareLock=%i DisableParentalRestrictions=%i "
 		"UseWhitelist=%i AutoFilterList=%i PlayNotOwnedGames=%i SafeMode=%i "
 		"Notifications=%i WarnHashMissmatch=%i NotifyInit=%i API=%i "
-		"FakeEmail=%s FakeWalletBalance=%i DisableCloud=%i Donate=%i "
+		"FakeEmail=%s FakeWalletBalance=%i Donate=%i "
 		"InjectAllAdvertisedDlc=%i Achievements=%i PatternCache=%i "
 		"AsyncProvision=%i ExtendedLogging=%i AutoUpdateApps=%i LogLevel=%u\n",
 		disableFamilyLock.get(), disableParentalRestrictions.get(),
 		useWhiteList.get(), automaticFilter.get(), playNotOwnedGames.get(),
 		safeMode.get(), notifications.get(), warnHashMissmatch.get(),
 		notifyInit.get(), api.get(), fakeEmail.get().c_str(),
-		fakeWalletBalance.get(), disableCloud.get(), donate.get().enabled,
+		fakeWalletBalance.get(), donate.get().enabled,
 		injectAllAdvertisedDlc.get(),
 		achievements.get(), patternCache.get(), asyncProvision.get(),
 		extendedLogging.get(), autoUpdateApps.get(), logLevel.get());

@@ -209,6 +209,58 @@ public:
 		serialize(message, nullptr);
 	}
 
+	// Replaces the body with already-serialized protobuf bytes. Used where the
+	// reply was built by hand (the Cloud store) and so has no generated message
+	// type to serialize from.
+	void serializeRaw(const uint8_t* bodyBytes, std::size_t bodyLen,
+	                  const CMsgProtoBufHeader* header)
+	{
+		if (!isValid() || bodyBytes == nullptr)
+		{
+			return;
+		}
+
+		CNetPacketBody* oldBody = body();
+		constexpr std::size_t headerOffset = sizeof(CNetPacketBody);
+		constexpr std::size_t maxPacketSize =
+			static_cast<std::size_t>(std::numeric_limits<int>::max());
+		const std::size_t headerSize = header ? header->ByteSizeLong() : 0;
+		if (headerSize > maxPacketSize - headerOffset ||
+			bodyLen > maxPacketSize - headerOffset - headerSize)
+		{
+			return;
+		}
+
+		const std::size_t messageOffset = headerOffset + headerSize;
+		const std::size_t newSize = bodyLen + messageOffset;
+		auto* memory = static_cast<uint8_t*>(
+			Steam::Plat_Alloc(static_cast<int>(newSize)));
+		if (!memory)
+		{
+			g_pLog->warn("Failed to allocate packet body with size %zu\n", newSize);
+			return;
+		}
+		auto* newBody = reinterpret_cast<CNetPacketBody*>(memory);
+		newBody->type = oldBody->type;
+		newBody->headerSize = static_cast<uint32_t>(headerSize);
+		if (header &&
+			!header->SerializeToArray(memory + headerOffset,
+			                          static_cast<int>(headerSize)))
+		{
+			Steam::Plat_Free(memory);
+			return;
+		}
+		if (bodyLen)
+		{
+			std::memcpy(memory + messageOffset, bodyBytes, bodyLen);
+		}
+
+		Steam::Plat_Free(oldBody);
+		setBody(reinterpret_cast<CNetPacketBody*>(memory));
+		setSize(static_cast<uint32_t>(newSize));
+		setOriginalBody(reinterpret_cast<CNetPacketBody*>(memory));
+	}
+
 	template<typename T>
 	T deserializeBody() const
 	{

@@ -2,6 +2,8 @@
 
 #include "cloudrpc.hpp"
 
+#include "../log.hpp"
+
 #include <algorithm>
 #include <ctime>
 
@@ -234,11 +236,20 @@ namespace CloudRPC
 		result.handled = true;
 
 		const uint32_t appId = static_cast<uint32_t>(CloudPB::varint(request, 1));
-		const uint64_t batchId = CloudPB::varint(request, 2);
+		const uint32_t batchEResult = static_cast<uint32_t>(CloudPB::varint(request, 3));
 
-		if (appId != 0 && accountId != 0 && batchId != 0)
+		// The change number is ember's own counter. Steam generates its own
+		// random 64-bit batch id and ignores the one we answer with, so echoing
+		// the request's batch id (field 2) wrote a garbage CN into the store and
+		// every later changelist reported it. Field 2 is still read for the log
+		// line only.
+		if (appId != 0 && accountId != 0 && batchEResult == 1)
 		{
-			CloudStore::setChangeNumber(root, accountId, appId, batchId);
+			const uint64_t next =
+			    CloudStore::changeNumber(root, accountId, appId) + 1;
+			CloudStore::setChangeNumber(root, accountId, appId, next);
+			g_pLog->info("Cloud: app=%u change number -> %llu\n", appId,
+			             static_cast<unsigned long long>(next));
 		}
 
 		// Empty response: CCloud_CompleteAppUploadBatch_Response has no fields.

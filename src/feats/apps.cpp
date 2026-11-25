@@ -314,31 +314,11 @@ void Apps::getSubscribedApps(uint32_t* appList, size_t size, uint32_t& count)
 
 bool Apps::shouldDisableCloud(uint32_t appId)
 {
-	const bool enabled = g_config.disableCloud.get();
-	if (!enabled)
-	{
-		return false;
-	}
-
-	const bool managed = g_config.isAddedAppId(appId);
-	const bool unlockNotOwned = g_config.playNotOwnedGames.get();
-
-	bool steamReportsOwned = true;
-	if (managed || !unlockNotOwned)
-	{
-		return Apps::cloudDisableDecision(enabled, managed, unlockNotOwned,
-		                                  steamReportsOwned);
-	}
-
-	CUser* user = getLocalUser();
-	if (user == nullptr)
-	{
-		return false;
-	}
-	steamReportsOwned = user->isSubscribed(appId);
-
-	return Apps::cloudDisableDecision(enabled, managed, unlockNotOwned,
-	                                  steamReportsOwned);
+	// `Cloud` is the only switch. The stock `DisableCloud` key is gone: two
+	// switches over one behaviour meant an old config silently turned the
+	// feature off while the file still showed a live-looking option.
+	(void)appId;
+	return !g_config.cloud.get();
 }
 
 bool Apps::shouldDisableCDKey(uint32_t appId)

@@ -117,7 +117,6 @@ public:
 	MTVariable<bool> warnHashMissmatch;
 	MTVariable<bool> notifyInit;
 	MTVariable<bool> api;
-	MTVariable<bool> disableCloud;
 
 	MTVariable<bool> autoUpdateApps;
 	MTVariable<DonateSettings> donate;

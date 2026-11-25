@@ -41,6 +41,18 @@ if [ -f "$SETUP_DIR/tools/ember-units.lib.sh" ]; then
 	. "$SETUP_DIR/tools/ember-units.lib.sh"
 fi
 
+# A source build records the commit it came from, so `ember update` can tell a
+# source install from a release install. Without this it compares the latest
+# tag to the latest tag and reports "up to date" forever.
+ember_version_stamp() {
+	local tag="${EMBER_VERSION:-unknown}"
+	if [ -n "${EMBER_SOURCE_REV:-}" ]; then
+		printf '%s+source-%s\n' "$tag" "$(printf '%s' "$EMBER_SOURCE_REV" | cut -c1-7)"
+	else
+		printf '%s\n' "$tag"
+	fi
+}
+
 # ============================================================================
 # Pretty output (colors + box-drawing). Falls back to plain text when stdout
 # is not a TTY or the terminal does not advertise colour support.
@@ -290,6 +302,13 @@ install_ember()
 
 	log_info "Installing ember libraries"
 	mkdir -p "$EMBERDIR" || exit 1
+	# Record which build this is. A tarball install carries its tag; a checkout
+	# carries tag+source-<sha>, so `ember update` never reports a source build
+	# as current with the release it was built beside.
+	if [ -z "${EMBER_SOURCE_REV:-}" ] && [ -d "$SETUP_DIR/.git" ]; then
+		EMBER_SOURCE_REV="$(git -C "$SETUP_DIR" rev-parse HEAD 2>/dev/null || true)"
+	fi
+	ember_version_stamp > "$EMBERDIR/VERSION"
 	cp -v ./bin/* "$EMBERDIR/" | sed "s|^|   ${MUTED}${NC}|"
 	# User units for the badge watcher and the cloud-push timer. Shipped beside
 	# the libs so the uninstaller and a later reinstall can find them.

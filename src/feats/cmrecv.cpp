@@ -8,6 +8,7 @@
 #include "manifestdonor.hpp"
 #include "misc.hpp"
 #include "pics.hpp"
+#include "cloudtransport.hpp"
 #include "ticket.hpp"
 
 #include "../log.hpp"
@@ -45,6 +46,7 @@ bool CmRecv::isTracked(uint32_t eMsg)
 		case EMSG_EMAIL_ADDRESS_INFO:
 		case EMSG_PICS_PRODUCTINFO_RESPONSE:
 		case EMSG_PICS_CHANGES_RESPONSE:
+		case kEMsgServiceMethodResponse:
 			return true;
 		default:
 			return false;
@@ -69,6 +71,34 @@ void CmRecv::dispatchNetPacket(CNetPacket* pkt)
 {
 	if (!pkt) return;
 	const uint32_t eMsg = pkt->getProtoBufType();
+
+	// Cloud replies. The answer was computed and stashed when the request went
+	// out; this is the half that puts it in front of the client. Without it the
+	// client reads Valve's own response -- for an unowned app that is
+	// EResult=AccessDenied on the per-file upload, while the changelist is
+	// tolerated, which is exactly "cloud does nothing" on a working transport.
+	if (eMsg == kEMsgServiceMethodResponse)
+	{
+		CMsgProtoBufHeader header;
+		if (pkt->deserializeHeader(header) && header.has_jobid_target())
+		{
+			std::vector<uint8_t> cloudBody;
+			uint32_t cloudEResult = 0;
+			if (CloudTransport::onRecv(header.jobid_target(), cloudBody, cloudEResult))
+			{
+				header.set_eresult(cloudEResult);
+				pkt->serializeRaw(cloudBody.data(), cloudBody.size(), &header);
+			}
+			else
+			{
+				// One line per unmatched response makes the other failure mode
+				// visible: a reply arriving on a seam this hook does not see.
+				g_pLog->infoOnce(
+				    "Cloud: service response job=%llu had no stashed answer\n",
+				    static_cast<unsigned long long>(header.jobid_target()));
+			}
+		}
+	}
 
 	if (eMsg == kEMsgClientLogOnResponse ||
 	    eMsg == kEMsgClientLoggedOff ||

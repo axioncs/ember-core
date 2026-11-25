@@ -93,11 +93,10 @@ SteamIdOverride:
 #Denuvo = 0x2
 SmartTickets: 0x1
 
-#Automatically disable ember when steamclient.so does not match a predefined file hash that is known to work
-#You should enable this if you're planing to use ember with Steam Deck's gamemode
-#DEPRECATED / no-op: this option is force-disabled in code. The Steam wrapper's
-#crash-loop fail-safe now covers the Game Mode boot protection this guarded, so
-#an unknown client hash no longer disables ember. Setting it has no effect.
+#Abort ember when steamclient.so does not match a known-good file hash.
+#With it on, an unknown client hash unloads ember and notifies, instead of
+#running hooks against a build they were not derived for. Off by default: the
+#wrapper's crash-loop fail-safe already covers the Game Mode case.
 SafeMode: no
 
 #Toggles notifications via notify-send
@@ -112,11 +111,6 @@ NotifyInit: yes
 
 #Enable sending commands to ember via /tmp/ember.API
 API: no
-
-#Disable cloud saves for unlocked games. Default "no" so CloudRedirect (shipped
-#with this stack) can sync saves to your own provider. Set to "yes" if you are
-#NOT using CloudRedirect, to avoid a doomed cloud sync that Steam rejects.
-DisableCloud: no
 
 #Serve Steam Cloud saves for games you added, from ~/.config/ember/cloud instead
 #of Steam's own cloud. Steam refuses cloud for apps the account does not own;
